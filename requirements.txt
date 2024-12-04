@@ -1,0 +1,8 @@
+python-dotenv
+py-cord
+yt_dlp
+validators
+httpx
+requests>=2.32.0 # not directly required, pinned by Snyk to avoid a vulnerability
+aiohttp>=3.9.4 # not directly required, pinned by Snyk to avoid a vulnerability
+zipp>=3.19.1 # not directly required, pinned by Snyk to avoid a vulnerability
