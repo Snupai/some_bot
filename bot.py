@@ -15,6 +15,7 @@ from subclasses import filebin, glyph_tools
 import spotipy
 
 make_ephemeral = False
+COOKIES_FILE = 'cookies.txt'
 
 # Load the environment variables from .env file
 load_dotenv()
@@ -160,6 +161,7 @@ async def dl_trim(ctx: discord.ApplicationContext,
         'quiet': True,
         'no_warnings': True,
         'nooverwrites': True,
+        'cookiefile': COOKIES_FILE,
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'opus',
@@ -233,6 +235,7 @@ async def get_yt_link(ctx: discord.ApplicationContext,
             ydl_opts = {
                 'default_search': 'ytsearch',
                 'quiet': True,
+                'cookiefile': COOKIES_FILE, 
             }
             with youtube_dl.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(search_query, download=False)
@@ -242,7 +245,7 @@ async def get_yt_link(ctx: discord.ApplicationContext,
             return
 
         # Handle non-Spotify URLs
-        ydl = youtube_dl.YoutubeDL()
+        ydl = youtube_dl.YoutubeDL({'cookiefile': COOKIES_FILE})
         info = ydl.extract_info(url, download=False)
         if 'entries' in info:
             video_url = info['entries'][0]['webpage_url']
