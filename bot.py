@@ -116,7 +116,6 @@ async def dl_trim(ctx: discord.ApplicationContext,
     """
     logger.info(f"{ctx.author} used /dl_trim command in {ctx.channel} on {ctx.guild}.")
 
-    # acknowledge the command without sending a response
     await ctx.defer()
 
     try:
@@ -127,7 +126,26 @@ async def dl_trim(ctx: discord.ApplicationContext,
         await ctx.respond(content=f"Error validating URL: {str(e)}", ephemeral=True)
         return
 
-    ydl = youtube_dl.YoutubeDL()
+    if "spotify.com" in url:
+        sp = spotipy.Spotify(auth_manager=spotipy.oauth2.SpotifyClientCredentials(
+            client_id=os.getenv('SPOTIFY_CLIENT_ID'),
+            client_secret=os.getenv('SPOTIFY_CLIENT_SECRET')
+        ))
+        track_id = url.split('/')[-1].split('?')[0]
+        track_info = sp.track(track_id)
+        artist = track_info['artists'][0]['name']
+        title = track_info['name']
+        search_query = f"{artist} - {title}"
+        ydl_opts = {
+            'default_search': 'ytsearch',
+            'quiet': True,
+            'cookiefile': COOKIES_FILE,
+        }
+        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(search_query, download=False)
+            url = info['entries'][0]['webpage_url']
+    
+    ydl = youtube_dl.YoutubeDL({'cookiefile': COOKIES_FILE})
     try:
         info = ydl.extract_info(url, download=False)
     except youtube_dl.DownloadError:
@@ -140,7 +158,6 @@ async def dl_trim(ctx: discord.ApplicationContext,
 
     title += f"_{uuid.uuid4()}"
 
-    # Validate begin and end times
     try:
         begin = float(begin)
         end = float(end)
@@ -152,7 +169,6 @@ async def dl_trim(ctx: discord.ApplicationContext,
         await ctx.respond(content="Invalid begin or end time.", ephemeral=True)
         return
 
-    # use youtube-dl to download the audio file from the url and trim it to the specified time range
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': f'{title}.%(ext)s',
@@ -176,21 +192,17 @@ async def dl_trim(ctx: discord.ApplicationContext,
             await ctx.respond(content=f"Error downloading the audio file: {e}", ephemeral=True)
             return
 
-    # Run ffmpeg using asyncio.create_subprocess_exec
     ffmpeg_cmd = ['ffmpeg', '-i', f'{title}.opus', '-ab', '189k', '-ss', str(begin), '-t', str(end - begin), '-acodec', 'libopus', f'{title}.ogg']
     process = await asyncio.create_subprocess_exec(*ffmpeg_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     stdout, stderr = await process.communicate()
 
     if process.returncode != 0:
-        # Handle the error if ffmpeg failed
         await ctx.respond(content=f"Error trimming the audio file: {stderr.decode()}", ephemeral=True)
         return
 
-    # Send the audio file
     try:
         await ctx.respond(content="Here's your audio! Enjoy! 🎵", file=discord.File(f'{title}.ogg'))
     finally:
-        # Clean up files
         for extension in ['.opus', '.ogg']:
             audio_file = Path(f'{title}{extension}')
             if audio_file.is_file():
