@@ -145,11 +145,21 @@ async def dl_trim(ctx: discord.ApplicationContext,
             info = ydl.extract_info(search_query, download=False)
             url = info['entries'][0]['webpage_url']
     
-    ydl = youtube_dl.YoutubeDL({'cookiefile': COOKIES_FILE})
+    ydl = youtube_dl.YoutubeDL({
+        'cookiefile': COOKIES_FILE,
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': True,
+        'nocheckcertificate': True,
+        'ignoreerrors': False,
+        'logtostderr': False,
+        'no_color': True,
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
     try:
         info = ydl.extract_info(url, download=False)
     except youtube_dl.DownloadError:
-        await ctx.respond(content="Error extracting info from the URL.", ephemeral=True)
+        await ctx.respond(content="Error extracting info from the URL. Please check if the video is available and try again.", ephemeral=True)
         return
 
     if end is None:
