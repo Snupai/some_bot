@@ -39,7 +39,7 @@ class GenericCog(commands.Cog):
         row = View()
 
         # Create buttons
-        button1 = Button(style=discord.ButtonStyle.primary, label="Snupai <:github:1315636762051350559>", url="https://github.com/Snupai/", emoji="🔧")
+        button1 = Button(style=discord.ButtonStyle.primary, label="Snupai", url="https://github.com/Snupai/", emoji=discord.PartialEmoji(name="github", id=1315636762051350559))
 
         # Add buttons to the row
         row.add_item(button1)
