@@ -32,7 +32,7 @@ class GenericCog(commands.Cog):
         # Create an embed
         embed = discord.Embed(title="About the bot")
         embed.description = "This bot is just a wittle test and playground for <@239809113125552129> :3"
-        embed.set_footer(text=f"Snupai~ | {ctx.interaction.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+        embed.set_footer(text=f"Snupai~ | {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
         # Create a button row
         row = View()
@@ -61,7 +61,7 @@ class GenericCog(commands.Cog):
         embed.add_field(name="/get_yt_link", value="Get the Youtube link to a Spotify song.", inline=False)
         embed.add_field(name="/dl_trim", value="Download and trim a YouTube video. You can also provide a Spotify song link.", inline=False)
         embed.add_field(name="/help", value="Display this help message.", inline=False)
-        embed.set_footer(text=f"Meaw~ | {ctx.interaction.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+        embed.set_footer(text=f"Meaw~ | {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
         # Send the embed
         await ctx.respond(embed=embed, ephemeral=True)
