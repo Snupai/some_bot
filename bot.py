@@ -65,7 +65,8 @@ for filename in os.listdir('./cogs'):
             print(f"Error loading extension: {filename}")
             print(f"Error: {str(e)}")
 
-activity: str = "Meaw~"
+DEFAULT_ACTIVITY: str = "Meaw~"
+activity: str = DEFAULT_ACTIVITY
 
 @bot.event
 async def on_command_error(ctx, error):
@@ -82,7 +83,7 @@ async def on_ready():
     logger.info(f'Logged in as {bot.user.name}')
     logger.info(f'ID: {bot.user.id}')
 
-    activity = "Meaw~"
+    activity = DEFAULT_ACTIVITY
 
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.playing, name=activity))
 
