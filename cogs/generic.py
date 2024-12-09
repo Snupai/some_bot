@@ -32,7 +32,7 @@ class GenericCog(commands.Cog):
         # Create an embed
         embed = discord.Embed(title="About the bot")
         embed.description = "This bot is just a wittle test and playground for <@239809113125552129> :3"
-        embed.set_footer(text=f"Snupai~ | {ctx.message.created_at.strftime("%Y-%m-%d %H:%M:%S")}")
+        embed.set_footer(text=f"Snupai~ | {ctx.message.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
 
         # Create a button row
         row = View()
