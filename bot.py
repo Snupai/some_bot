@@ -25,7 +25,7 @@ intents = discord.Intents()
 intents.members = True
 intents.message_content = True
 
-bot = commands.AutoShardedBot(intents=intents, sync_commands=False, help_command=None)
+bot = commands.AutoShardedBot(intents=intents, sync_commands=True, help_command=None)
 
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
