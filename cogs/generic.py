@@ -31,19 +31,17 @@ class GenericCog(commands.Cog):
 
         # Create an embed
         embed = discord.Embed(title="About the bot")
-        embed.description = "This discord bot is an easy interface for the Custom Glyph tools. It uses the scripts created by <@429776328833761280> to create and visualize custom glyphs. You can find the source code for the tools at the following links:"
-        embed.set_footer(text="Click a button to navigate to the according Github Repo.")
+        embed.description = "This bot is just a wittle test and playground for <@239809113125552129> :3"
+        embed.set_footer(text=f"Snupai~ | {ctx.message.created_at.strftime("%Y-%m-%d %H:%M:%S")}")
 
         # Create a button row
         row = View()
 
         # Create buttons
-        button1 = Button(style=discord.ButtonStyle.primary, label="SebiAi/custom-nothing-glyph-tools", url="https://github.com/SebiAi/custom-nothing-glyph-tools", emoji="🔧")
-        button2 = Button(style=discord.ButtonStyle.primary, label="SebiAi/GlyphVisualizer", url="https://github.com/SebiAi/GlyphVisualizer", emoji="🔍")
+        button1 = Button(style=discord.ButtonStyle.primary, label="Snupai <:github:1315636762051350559>", url="https://github.com/Snupai/", emoji="🔧")
 
         # Add buttons to the row
         row.add_item(button1)
-        row.add_item(button2)
 
         # Add the button row to the embed
         await ctx.respond(embed=embed, view=row, ephemeral=True)
@@ -60,11 +58,10 @@ class GenericCog(commands.Cog):
         embed.description = "This bot provides an easy interface for the Custom Glyph tools. You can use the following commands to create and visualize custom glyphs:"
         embed.add_field(name="/ping", value="Check if the bot is online.", inline=False)
         embed.add_field(name="/about", value="Display information about the bot.", inline=False)
-        embed.add_field(name="/create", value="Create a custom glyph.", inline=False)
-        embed.add_field(name="/visualize", value="Visualize a custom glyph.", inline=False)
-        embed.add_field(name="/publish", value="Publish a custom glyph to our database.", inline=False)
-        embed.add_field(name="/search", value="Search for a custom glyph.", inline=False)
+        embed.add_field(name="/get_yt_link", value="Get the Youtube link to a Spotify song.", inline=False)
+        embed.add_field(name="/dl_trim", value="Download and trim a YouTube video. You can also provide a Spotify song link.", inline=False)
         embed.add_field(name="/help", value="Display this help message.", inline=False)
+        embed.set_footer(text=f"Meaw~ | {ctx.message.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
 
         # Send the embed
         await ctx.respond(embed=embed, ephemeral=True)
