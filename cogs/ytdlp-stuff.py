@@ -12,6 +12,8 @@ import validators
 import os
 import yt_dlp as youtube_dl
 import spotipy
+from pydub import AudioSegment
+import base64
 
 COOKIES_FILE = 'cookies.txt'
 
@@ -78,7 +80,8 @@ class YoutubeDLPCog(commands.Cog):
 
         if end is None:
             end = info['duration']
-        title = info['title']
+        title = str(info['title'])  # Fixed syntax for type conversion
+        self.logger.debug(f"Type of title before modification: {type(title)}")
 
         title += f"_{uuid.uuid4()}"
 
@@ -125,7 +128,26 @@ class YoutubeDLPCog(commands.Cog):
             return
 
         try:
-            await ctx.respond(content="Here's your audio! Enjoy! 🎵", file=discord.File(f'{title}.ogg'))
+            filepath = f'{title}.ogg'
+            self.logger.debug(f"Calculated title: {title}")
+            if not os.path.exists(filepath):
+                await ctx.respond(content="Error finding the audio file.", ephemeral=True)
+                return
+            # Step 2: Send the message with the uploaded file
+            audio = AudioSegment.from_ogg(filepath)
+            duration_secs = round(len(audio) / 1000.0, 2)
+
+            samples = audio.get_array_of_samples()
+            step = max(1, len(samples) // 100)
+            waveform = [abs(samples[i]) for i in range(0, len(samples), step)]
+            max_val = max(waveform) if waveform else 1
+            waveform = [int((val / max_val) * 255) for val in waveform]
+            waveform = waveform[:100]
+            waveform_data = base64.b64encode(bytes(waveform)).decode('utf-8')
+            
+            await ctx.respond(file=discord.VoiceMessage(f'{title}.ogg', waveform=waveform_data, duration_secs=duration_secs, filename="voice-message.ogg", description="some song idk"))
+
+            #await ctx.respond(content="Here's your audio! Enjoy! 🎵", file=discord.File(f'{title}.ogg'))
         finally:
             for extension in ['.opus', '.ogg']:
                 audio_file = Path(f'{title}{extension}')
