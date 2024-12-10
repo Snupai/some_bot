@@ -8,11 +8,12 @@ from discord.ext import commands
 from discord.ui import Button, View
 import datetime
 
-logger = logging.getLogger('bot.py')
+
 
 class GenericCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.logger = logging.getLogger('bot.py')
 
     @commands.slash_command(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install})
     async def ping(self, ctx):
@@ -20,7 +21,7 @@ class GenericCog(commands.Cog):
         Command to check if the bot is online.
         """
         # Assuming logger is defined and make_ephemeral is a function that determines if the response should be ephemeral
-        logger.info(f"{ctx.author} used /ping command in {ctx.channel} on {ctx.guild}.")
+        self.logger.info(f"{ctx.author} used /ping command in {ctx.channel} on {ctx.guild}.")
         await ctx.respond(f'Pong! {round(self.bot.latency * 1000)}ms', ephemeral=True)
 
     @commands.slash_command(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install})
@@ -28,7 +29,7 @@ class GenericCog(commands.Cog):
         """
         Command to display information about the bot.
         """
-        logger.info(f"{ctx.author} used /about command in {ctx.channel} on {ctx.guild}.")
+        self.logger.info(f"{ctx.author} used /about command in {ctx.channel} on {ctx.guild}.")
 
         # Create an embed
         embed = discord.Embed(title="About the bot")
@@ -52,7 +53,7 @@ class GenericCog(commands.Cog):
         """
         Command to display the help message.
         """
-        logger.info(f"{ctx.author} used /help command in {ctx.channel} on {ctx.guild}.")
+        self.logger.info(f"{ctx.author} used /help command in {ctx.channel} on {ctx.guild}.")
 
         # Create an embed
         embed = discord.Embed(title="Help")
