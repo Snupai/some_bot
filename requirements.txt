@@ -1,5 +1,5 @@
 python-dotenv
-py-cord
+git+https://github.com/Pycord-Development/pycord.git@refs/pull/2579/head # py-cord use pull request 2579 to use voice messages
 yt_dlp
 validators
 httpx
@@ -7,3 +7,4 @@ requests>=2.32.0 # not directly required, pinned by Snyk to avoid a vulnerabilit
 aiohttp>=3.9.4 # not directly required, pinned by Snyk to avoid a vulnerability
 zipp>=3.19.1 # not directly required, pinned by Snyk to avoid a vulnerability
 spotipy
+pydub
