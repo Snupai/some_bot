@@ -107,7 +107,7 @@ class PPLXAICog(commands.Cog):
 
         # Replace occurrences of [n] with [n](citations[n])
         for index, citation in enumerate(citations):
-            content = content.replace(f"[{index}]", f"[{index}]({citation})")
+            content = content.replace(f"[{index}]", f"[{index}](<{citation}>)")
 
         if len(content) > 2000:  
                 chunks = self.split_text(content)
