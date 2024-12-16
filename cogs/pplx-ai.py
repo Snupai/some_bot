@@ -102,6 +102,7 @@ class PPLXAICog(commands.Cog):
             ]
         )
         content = response.choices[0].message.content
+        content = content.replace("####", "###") # for discord compatibility
         if len(content) > 2000:  
                 chunks = self.split_text(content)
                 await ctx.respond(content=chunks[0])
