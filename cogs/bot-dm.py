@@ -5,6 +5,7 @@ import sqlite3
 from datetime import datetime, timedelta
 import time
 from openai import OpenAI
+import os
 
 bot_owner_id = 239809113125552129
 DB_FILE = "user_threads.sqlite"
