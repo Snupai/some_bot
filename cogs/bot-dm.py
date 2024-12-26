@@ -6,10 +6,25 @@ from datetime import datetime, timedelta
 import time
 from openai import OpenAI
 import os
+import tiktoken
 
 bot_owner_id = 239809113125552129
 DB_FILE = "user_threads.sqlite"
 ASSISTANT_ID = "asst_n2rpn7o0MVIwSMihnPUuV3LI"
+ai_model = "gpt-4o-mini"
+
+model_token_encodings: dict = {
+    "gpt-4o": "o200k_base",
+    "gpt-4o-mini": "o200k_base",
+    "gpt-4-turbo": "cl100k_base",
+    "gpt-4": "cl100k_base",
+    "gpt-3.5-turbo": "cl100k_base",
+    "text-embedding-ada-002": "cl100k_base",
+    "text-embedding-3-small": "cl100k_base",
+    "text-embedding-3-large": "cl100k_base",
+    "text-davinci-002": "p50k_base",
+    "text-davinci-003": "p50k_base",
+}
 
 class BotDMCog(commands.Cog):
     def __init__(self, bot):
@@ -30,6 +45,15 @@ class BotDMCog(commands.Cog):
         ''')
         conn.commit()
         conn.close()
+
+    async def wait_on_run(self, run, thread):
+        while run.status == "queued" or run.status == "in_progress":
+            run = client.beta.threads.runs.retrieve(
+                thread_id=thread.id,
+                run_id=run.id,
+            )
+            time.sleep(0.5)
+        return run
 
     async def manage_user_thread(self, user_id, message_content):
         current_time = datetime.now()
@@ -74,9 +98,7 @@ class BotDMCog(commands.Cog):
             )
 
             # Wait for the run to complete
-            while run.status == "queued" or run.status == "in_progress":
-                time.sleep(1)
-                run = self.client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
+            run = await wait_on_run(run, thread_id)
 
             # Get the assistant's response
             messages = self.client.beta.threads.messages.list(thread_id=thread_id, order="desc", limit=1)
@@ -108,6 +130,11 @@ class BotDMCog(commands.Cog):
         finally:
             conn.close()
 
+    async def get_token_count(self, text, model):
+        encoding = model_token_encodings[model]
+        tokens = tiktoken.get_encoding(encoding).encode(text)
+        return len(tokens)
+
     @commands.Cog.listener()
     async def on_message(self, message):
         # Check if the message is a DM and not from a bot
@@ -122,7 +149,11 @@ class BotDMCog(commands.Cog):
                     user_id = str(message.author.id)
                     user_name = message.author.display_name
                     message_content = f"{user_id}, {user_name}\n{message.content}"
+                    user_message_tokens = await self.get_token_count(message_content, ai_model)
                     response = await self.manage_user_thread(user_id, message_content)
+                    response_tokens = await self.get_token_count(response, ai_model)
+                    response += f"\n-# prompt: {user_message_tokens} | response: {response_tokens} | total: {user_message_tokens + response_tokens}"
+
                     
                     # Send the assistant's response back to the user in DM
                     await message.channel.send(response)
