@@ -119,7 +119,10 @@ class BotDMCog(commands.Cog):
             else:
                 try:
                     # Handle AI response using manage_user_thread function
-                    response = await self.manage_user_thread(str(message.author.id), message.content)
+                    user_id = str(message.author.id)
+                    user_name = message.author.display_name
+                    message_content = f"{user_id}, {user_name}\n{message.content}"
+                    response = await self.manage_user_thread(user_id, message_content)
                     
                     # Send the assistant's response back to the user in DM
                     await message.channel.send(response)
