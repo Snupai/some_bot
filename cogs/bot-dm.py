@@ -14,7 +14,7 @@ class BotDMCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.logger = logging.getLogger('bot.py')
-        self.client = OpenAI()
+        self.client = OpenAI(api_key=os.getenv('OPENAI_TOKEN'))
         self.initialize_db()
 
     def initialize_db(self):
