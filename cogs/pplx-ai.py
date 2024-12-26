@@ -24,7 +24,7 @@ class PPLXAICog(commands.Cog):
 
     def split_text(self, text: str, max_length: int = 2000) -> list[str]:
         """
-        Splits text into segments of a maximum length.
+        Splits text into segments of a maximum length while preserving code blocks.
 
         Args:
             text (str): The text to split.
@@ -37,7 +37,7 @@ class PPLXAICog(commands.Cog):
         def find_split_point(text, max_len, min_len, priority_patterns):
             for pattern in priority_patterns:
                 matches = list(re.finditer(pattern, text))
-                for match in reversed(matches):  # Start checking from the closest match before max_len
+                for match in reversed(matches):
                     if min_len <= match.start() <= max_len:
                         return match.start()
             return None
@@ -51,18 +51,35 @@ class PPLXAICog(commands.Cog):
             r'\n'         # Single newline
         ]
 
+        code_block_pattern = re.compile(r'```(.*?)\n(.*?)(?=\n```|\Z)', re.DOTALL)
+
         min_length = max_length // 2
         segments = []
 
         while len(text) > max_length:
-            split_point = find_split_point(text, max_length, min_length, priority_patterns)
-            if split_point is None:  # No suitable split point found, force a split at max_length
-                split_point = max_length
+            if match := code_block_pattern.search(text):
+                start, end = match.span()
+                if start > 0:
+                    segments.append(text[:start].rstrip())
+                    text = text[start:]
 
-            segments.append(text[:split_point].rstrip())
-            text = text[split_point:].lstrip()
+                code_block_content = match.group(0)
+                if len(code_block_content) > max_length:
+                    split_code_blocks = self.split_text(code_block_content, max_length)
+                    segments.extend(split_code_blocks)
+                else:
+                    segments.append(code_block_content)
 
-        if text:  # Add any remaining text
+                text = text[end:].lstrip()
+            else:
+                split_point = find_split_point(text, max_length, min_length, priority_patterns)
+                if split_point is None:
+                    split_point = max_length
+
+                segments.append(text[:split_point].rstrip())
+                text = text[split_point:].lstrip()
+
+        if text:
             segments.append(text)
 
         return segments
