@@ -95,20 +95,37 @@ class BotDMCog(commands.Cog):
 
         finally:
             conn.close()
+        
+    async def delete_user_thread(self, user_id):
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        try:
+            cursor.execute("DELETE FROM user_threads WHERE user_id = ?", (user_id,))
+            conn.commit()
+        except Exception as e:
+            self.logger.error(f"Error in delete_user_thread: {e}")
+            return "An error occurred while processing your request."
+        finally:
+            conn.close()
 
     @commands.Cog.listener()
     async def on_message(self, message):
         # Check if the message is a DM and not from a bot
         if message.channel.type == discord.ChannelType.private and message.author.id == bot_owner_id:
-            try:
-                # Handle AI response using manage_user_thread function
-                response = await self.manage_user_thread(str(message.author.id), message.content)
-                
-                # Send the assistant's response back to the user in DM
-                await message.channel.send(response)
-            except Exception as e:
-                self.logger.error(f"Error handling DM: {e}")
-                await message.channel.send("An error occurred while processing your request.")
+            # if message mentions the bot
+            if message.mentions and message.content.startswith("!clear"):
+                # delete the current user thread if it exists 
+                await self.delete_user_thread(str(message.author.id))
+            else:
+                try:
+                    # Handle AI response using manage_user_thread function
+                    response = await self.manage_user_thread(str(message.author.id), message.content)
+                    
+                    # Send the assistant's response back to the user in DM
+                    await message.channel.send(response)
+                except Exception as e:
+                    self.logger.error(f"Error handling DM: {e}")
+                    await message.channel.send("An error occurred while processing your request.")
 
 def setup(bot):
     bot.add_cog(BotDMCog(bot))
