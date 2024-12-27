@@ -7,6 +7,7 @@ import time
 from openai import OpenAI
 import os
 import tiktoken
+import asyncio
 
 bot_owner_id = 239809113125552129
 DB_FILE = "user_threads.sqlite"
@@ -46,13 +47,16 @@ class BotDMCog(commands.Cog):
         conn.commit()
         conn.close()
 
-    async def wait_on_run(self, run, thread):
-        while run.status == "queued" or run.status == "in_progress":
-            run = client.beta.threads.runs.retrieve(
-                thread_id=thread.id,
+    async def wait_on_run(self, run, thread_id):
+        timekeeper = time.time()
+        while run.status in ["queued", "in_progress"]:
+            run = self.client.beta.threads.runs.retrieve(
+                thread_id=thread_id,
                 run_id=run.id,
             )
-            time.sleep(0.5)
+            await asyncio.sleep(0.5)
+            if time.time() - timekeeper > 90.0:  # timeout after 90 seconds
+                raise Exception("Timeout: The operation took longer than expected.")
         return run
 
     async def manage_user_thread(self, user_id, message_content):
@@ -84,6 +88,8 @@ class BotDMCog(commands.Cog):
                                (user_id, thread_id, expiry.isoformat()))
                 conn.commit()
 
+            self.logger.debug(f"thread {thread_id} for user {user_id}")
+
             # Add the message to the thread
             self.client.beta.threads.messages.create(
                 thread_id=thread_id,
@@ -96,9 +102,16 @@ class BotDMCog(commands.Cog):
                 thread_id=thread_id,
                 assistant_id=ASSISTANT_ID
             )
+            
+            self.logger.debug(f"run {run} for thread {thread_id}")
 
             # Wait for the run to complete
-            run = await wait_on_run(run, thread_id)
+            try:
+                run = await self.wait_on_run(run, thread_id)
+            except Exception as e:
+                return f"Your request timed out. Please try again.\n{e}" 
+
+            self.logger.debug(f"run {run} for thread {thread_id} completed")
 
             # Get the assistant's response
             messages = self.client.beta.threads.messages.list(thread_id=thread_id, order="desc", limit=1)
