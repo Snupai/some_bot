@@ -37,11 +37,11 @@ def setup_logger():
     """
     log_file = f"bot_{timestamp}.log"
     logger = logging.getLogger('bot.py')
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
 
     # Create a file handler and set the log level
     file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(logging.INFO)
+    file_handler.setLevel(logging.DEBUG)
 
     # Create a formatter and add it to the file handler
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
