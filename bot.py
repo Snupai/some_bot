@@ -17,6 +17,9 @@ import spotipy
 make_ephemeral = False
 COOKIES_FILE = 'cookies.txt'
 
+GUILD_INSTALL_LINK = "https://discord.com/oauth2/authorize?client_id=1219270011164688514&permissions=1759214275783799&redirect_uri=https%3A%2F%2Fdiscord.com%2Foauth2%2Fauthorize%3Fclient_id%3D1219270011164688514&integration_type=0&scope=bot"
+USER_INSTALL_LINK = "https://discord.com/oauth2/authorize?client_id=1219270011164688514&redirect_uri=https%3A%2F%2Fdiscord.com%2Foauth2%2Fauthorize%3Fclient_id%3D1219270011164688514&integration_type=1&scope=applications.commands"
+
 # Load the environment variables from .env file
 load_dotenv()
 
@@ -43,12 +46,18 @@ def setup_logger():
     file_handler = logging.FileHandler(log_file)
     file_handler.setLevel(logging.DEBUG)
 
+    # Create a console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+
     # Create a formatter and add it to the file handler
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
 
-    # Add the file handler to the logger
+    # Add the handlers to the logger
     logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
 
     return logger
 
@@ -83,6 +92,8 @@ async def on_ready():
     """
     logger.info(f'Logged in as {bot.user.name}')
     logger.info(f'ID: {bot.user.id}')
+    logger.info(f"Guild install link: {GUILD_INSTALL_LINK}")
+    logger.info(f"User install link: {USER_INSTALL_LINK}") 
 
     activity = DEFAULT_ACTIVITY
 
