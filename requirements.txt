@@ -10,3 +10,4 @@ spotipy
 pydub
 openai
 tiktoken
+feedparser
