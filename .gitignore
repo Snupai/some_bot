@@ -5,6 +5,8 @@
 .env
 
 cookies.txt
+output.txt
+*.sqlite
 
 ### Python ###
 # Byte-compiled / optimized / DLL files
