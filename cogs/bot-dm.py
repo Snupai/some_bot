@@ -171,7 +171,6 @@ class BotDMCog(commands.Cog):
                     response_tokens = await self.get_token_count(response, ai_model)
                     response += f"\n-# prompt: {user_message_tokens} | response: {response_tokens} | total: {user_message_tokens + response_tokens}"
 
-                    
                     # Send the assistant's response back to the user in DM
                     await message.channel.send(response)
                 except Exception as e:
