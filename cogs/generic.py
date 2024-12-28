@@ -53,7 +53,7 @@ class GenericCog(commands.Cog):
 
         # Create an embed
         embed = discord.Embed(title="About the bot")
-        embed.description = "This bot is just a wittle test and playground for <@239809113125552129> :3"
+        embed.description = "This bot is just a little test and playground for <@239809113125552129> :3"
         embed.set_footer(text=f"Snupai~ | {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
         # Create a button row
@@ -77,15 +77,25 @@ class GenericCog(commands.Cog):
 
         # Create an embed
         embed = discord.Embed(title="Help")
-        embed.description = "This bot provides an easy interface for the Custom Glyph tools. You can use the following commands to create and visualize custom glyphs:"
+
+        if ctx.guild:
+            # Guild-specific commands
+            embed.description = "Some guild-specific commands:"
+            embed.add_field(name="/rss add_feed", value="Add a new RSS feed to monitor.", inline=False)
+            embed.add_field(name="/rss remove_feed", value="Remove an RSS feed from monitoring.", inline=False)
+            embed.add_field(name="/rss set_feed_channel", value="Set the channel for RSS feed updates.", inline=False)
+            embed.add_field(name="/rss list_feeds", value="List all current RSS feeds.", inline=False)
+            embed.add_field(name="/rss get_last_feed", value="Get the last post from an RSS feed.", inline=False)
+        # User-specific commands
+        embed.description = "Some user-specific commands:"
         embed.add_field(name="/ping", value="Check if the bot is online.", inline=False)
         embed.add_field(name="/about", value="Display information about the bot.", inline=False)
         embed.add_field(name="/get_yt_link", value="Get the Youtube link to a Spotify song.", inline=False)
         embed.add_field(name="/dl_trim", value="Download and trim a YouTube video. You can also provide a Spotify song link.", inline=False)
         embed.add_field(name="/help", value="Display this help message.", inline=False)
+
         embed.set_footer(text=f"Meaw~ | {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-        # Send the embed
         await ctx.respond(embed=embed, ephemeral=True)
 
 def setup(bot):
