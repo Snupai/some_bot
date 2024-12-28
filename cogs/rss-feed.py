@@ -182,7 +182,7 @@ class RSSFeed(commands.Cog):
         conn.close()
         return result if result else (None, None)
 
-    async def respond_with_feed(self, ctx, name, last_entry, parsed_feed):
+    async def respond_with_feed(self, ctx, name, last_entry, parsed_feed: feedparser.FeedParserDict):
         guild_id = str(ctx.guild.id)
         if not last_entry:
             latest_entry = parsed_feed.entries[0]
@@ -190,40 +190,46 @@ class RSSFeed(commands.Cog):
             latest_entry = next((entry for entry in parsed_feed.entries if entry.id == last_entry), None)
             if not latest_entry:
                 latest_entry = parsed_feed.entries[0]
-
+    
         embed = discord.Embed(
             title=latest_entry.title,
+            url=latest_entry.link,
             description=latest_entry.description,
             color=discord.Color.blue()
         )
-        embed.add_field(name="Category", value=latest_entry.get("category", []), inline=False)
-        embed.add_field(name="Published Date", value=latest_entry.published, inline=False)
-        embed.set_footer(text=f"RSS Feed: {name}")
-
+        
         if 'enclosures' in latest_entry:
             for enclosure in latest_entry.enclosures:
                 if enclosure.type.startswith('image'):
                     embed.set_image(url=enclosure.href)
                     break
 
+        embed.add_field(name="Category", value=latest_entry.get("category", []), inline=False)
+        embed.add_field(name="Published Date", value=latest_entry.published, inline=False)
+        embed.set_author(name=parsed_feed.feed.title)
+        embed.set_footer(text=f"RSS Feed: {name}")
+
         self.logger.info(f"Sending post from '{name}' for guild {guild_id}: {latest_entry.title}")
         await ctx.respond(embed=embed)
 
-    async def send_feed_update(self, channel, name, entry):
+    async def send_feed_update(self, channel, name, entry, parsed_feed: feedparser.FeedParserDict):
         embed = discord.Embed(
             title=entry.title,
+            url=entry.link,
             description=entry.description,
             color=discord.Color.blue()
         )
-        embed.add_field(name="Category", value=entry.get("category", []), inline=False)
-        embed.add_field(name="Published Date", value=entry.published, inline=False)
-        embed.set_footer(text=f"RSS Feed: {name}")
         
         if 'enclosures' in entry:
             for enclosure in entry.enclosures:
                 if enclosure.type.startswith('image'):
                     embed.set_image(url=enclosure.href)
                     break
+        
+        embed.add_field(name="Category", value=entry.get("category", []), inline=False)
+        embed.add_field(name="Published Date", value=entry.published, inline=False)
+        embed.set_author(name=parsed_feed.feed.title)
+        embed.set_footer(text=f"RSS Feed: {name}")
 
         await channel.send(embed=embed)
 
@@ -260,7 +266,7 @@ class RSSFeed(commands.Cog):
         name, url, last_entry = feed
         parsed_feed = feedparser.parse(url)
         if not parsed_feed.entries:
-            self.logger.info(f"No entries found in the feed '{name}' for guild {guild_id}")
+            self.logger.debug(f"No entries found in the feed '{name}' for guild {guild_id}")
             return
 
         new_entries = self.get_new_entries(parsed_feed, last_entry)
@@ -268,8 +274,8 @@ class RSSFeed(commands.Cog):
             cursor.execute('UPDATE feeds SET last_entry = ? WHERE guild_id = ? AND name = ?',
                            (new_entries[0].id, guild_id, name))
             for entry in reversed(new_entries):
-                await self.send_feed_update(channel, name, entry)
-                self.logger.info(f"New post in '{name}' for guild {guild_id}: {entry.title}")
+                await self.send_feed_update(channel, name, entry, parsed_feed)
+                self.logger.debug(f"New post in '{name}' for guild {guild_id}: {entry.title}")
 
     def get_new_entries(self, parsed_feed, last_entry):
         new_entries = []
