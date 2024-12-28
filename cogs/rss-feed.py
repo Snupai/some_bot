@@ -45,11 +45,24 @@ class RSSFeed(commands.Cog):
         self.logger.debug("Getting database connection")
         return sqlite3.connect(self.db_path)
 
+    async def is_user_allowed(self, user):
+        # check the allowed_users.sqlite file for the user
+        conn = sqlite3.connect('allowed_users.sqlite')
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id FROM allowed_users WHERE user_id = ?', (user.id,))
+        result = cursor.fetchone()
+        if result:
+            return True
+        return False
+    
     rss = SlashCommandGroup(name="rss", description="Manage RSS feeds")
 
     @rss.command(integration_types={IntegrationType.guild_install}, name="add_feed", description="Add a new RSS feed to monitor")
     @default_permissions(administrator=True)
     async def add_feed(self, ctx, name: Option(str, "Name of the feed"), url: Option(str, "URL of the RSS feed")):
+        if not await self.is_user_allowed(ctx.author):
+            await ctx.respond(content="You are not allowed to use this command.", ephemeral=True)
+            return
         guild_id = str(ctx.guild.id)
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -65,6 +78,9 @@ class RSSFeed(commands.Cog):
     @rss.command(integration_types={IntegrationType.guild_install}, name="remove_feed", description="Remove an RSS feed from monitoring")
     @default_permissions(administrator=True)
     async def remove_feed(self, ctx, name: Option(str, "Name of the feed to remove")):
+        if not await self.is_user_allowed(ctx.author):
+            await ctx.respond(content="You are not allowed to use this command.", ephemeral=True)
+            return
         guild_id = str(ctx.guild.id)
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -83,6 +99,9 @@ class RSSFeed(commands.Cog):
     @rss.command(integration_types={IntegrationType.guild_install}, name="set_feed_channel", description="Set the channel for RSS feed updates")
     @default_permissions(administrator=True)
     async def set_feed_channel(self, ctx, channel: Option(TextChannel, "The channel to send RSS updates to")):
+        if not await self.is_user_allowed(ctx.author):
+            await ctx.respond(content="You are not allowed to use this command.", ephemeral=True)
+            return
         guild_id = str(ctx.guild.id)
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -97,6 +116,9 @@ class RSSFeed(commands.Cog):
 
     @rss.command(integration_types={IntegrationType.guild_install}, name="list_feeds", description="List all current RSS feeds")
     async def list_feeds(self, ctx):
+        if not await self.is_user_allowed(ctx.author):
+            await ctx.respond(content="You are not allowed to use this command.", ephemeral=True)
+            return
         guild_id = str(ctx.guild.id)
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -124,6 +146,9 @@ class RSSFeed(commands.Cog):
 
     @rss.command(integration_types={IntegrationType.guild_install}, name="get_last_feed", description="Get the last post from an RSS feed")
     async def get_last_feed(self, ctx, name: Option(str, "Name of the feed")):
+        if not await self.is_user_allowed(ctx.author):
+            await ctx.respond(content="You are not allowed to use this command.", ephemeral=True)
+            return
         if not await self.feed_exists(ctx, name):
             return
 
@@ -161,17 +186,46 @@ class RSSFeed(commands.Cog):
         guild_id = str(ctx.guild.id)
         if not last_entry:
             latest_entry = parsed_feed.entries[0]
-            self.logger.info(f"Latest post from '{name}' for guild {guild_id}: {latest_entry.title}")
-            await ctx.respond(f"Latest post from '{name}':\n**{latest_entry.title}**\n{latest_entry.link}")
         else:
             latest_entry = next((entry for entry in parsed_feed.entries if entry.id == last_entry), None)
-            if latest_entry:
-                self.logger.info(f"Last post from '{name}' for guild {guild_id}: {latest_entry.title}")
-                await ctx.respond(f"Last post from '{name}':\n**{latest_entry.title}**\n{latest_entry.link}")
-            else:
+            if not latest_entry:
                 latest_entry = parsed_feed.entries[0]
-                self.logger.info(f"Latest post from '{name}' for guild {guild_id}: {latest_entry.title}")
-                await ctx.respond(f"Latest post from '{name}':\n**{latest_entry.title}**\n{latest_entry.link}")
+
+        embed = discord.Embed(
+            title=latest_entry.title,
+            description=latest_entry.description,
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Category", value=latest_entry.get("category", []), inline=False)
+        embed.add_field(name="Published Date", value=latest_entry.published, inline=False)
+        embed.set_footer(text=f"RSS Feed: {name}")
+
+        if 'enclosures' in latest_entry:
+            for enclosure in latest_entry.enclosures:
+                if enclosure.type.startswith('image'):
+                    embed.set_image(url=enclosure.href)
+                    break
+
+        self.logger.info(f"Sending post from '{name}' for guild {guild_id}: {latest_entry.title}")
+        await ctx.respond(embed=embed)
+
+    async def send_feed_update(self, channel, name, entry):
+        embed = discord.Embed(
+            title=entry.title,
+            description=entry.description,
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Category", value=entry.get("category", []), inline=False)
+        embed.add_field(name="Published Date", value=entry.published, inline=False)
+        embed.set_footer(text=f"RSS Feed: {name}")
+        
+        if 'enclosures' in entry:
+            for enclosure in entry.enclosures:
+                if enclosure.type.startswith('image'):
+                    embed.set_image(url=enclosure.href)
+                    break
+
+        await channel.send(embed=embed)
 
     @tasks.loop(minutes=5)
     async def check_feeds(self):
@@ -214,11 +268,7 @@ class RSSFeed(commands.Cog):
             cursor.execute('UPDATE feeds SET last_entry = ? WHERE guild_id = ? AND name = ?',
                            (new_entries[0].id, guild_id, name))
             for entry in reversed(new_entries):
-                await channel.send(
-                    f"New post in '{name}':\n"
-                    f"**{entry.title}**\n"
-                    f"{entry.link}"
-                )
+                await self.send_feed_update(channel, name, entry)
                 self.logger.info(f"New post in '{name}' for guild {guild_id}: {entry.title}")
 
     def get_new_entries(self, parsed_feed, last_entry):
