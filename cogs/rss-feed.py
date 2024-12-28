@@ -1,5 +1,5 @@
 import discord
-from discord import default_permissions
+from discord import default_permissions, Option, TextChannel, IntegrationType, SlashCommandGroup
 from discord.ext import commands, tasks
 import feedparser
 import sqlite3
@@ -45,11 +45,11 @@ class RSSFeed(commands.Cog):
         self.logger.debug("Getting database connection")
         return sqlite3.connect(self.db_path)
 
-    rss = discord.SlashCommandGroup(name="rss", description="Manage RSS feeds")
+    rss = SlashCommandGroup(name="rss", description="Manage RSS feeds")
 
-    @rss.command(integration_types={discord.IntegrationType.guild_install}, name="add_feed", description="Add a new RSS feed to monitor")
+    @rss.command(integration_types={IntegrationType.guild_install}, name="add_feed", description="Add a new RSS feed to monitor")
     @default_permissions(administrator=True)
-    async def add_feed(self, ctx, name: discord.Option(str, "Name of the feed"), url: discord.Option(str, "URL of the RSS feed")):
+    async def add_feed(self, ctx, name: Option(str, "Name of the feed"), url: Option(str, "URL of the RSS feed")):
         guild_id = str(ctx.guild.id)
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -62,9 +62,9 @@ class RSSFeed(commands.Cog):
         self.logger.info(f"Added RSS feed '{name}' with URL: {url} for guild {guild_id}")
         await ctx.respond(f"Added RSS feed '{name}' with URL: {url}")
 
-    @rss.command(integration_types={discord.IntegrationType.guild_install}, name="remove_feed", description="Remove an RSS feed from monitoring")
+    @rss.command(integration_types={IntegrationType.guild_install}, name="remove_feed", description="Remove an RSS feed from monitoring")
     @default_permissions(administrator=True)
-    async def remove_feed(self, ctx, name: discord.Option(str, "Name of the feed to remove")):
+    async def remove_feed(self, ctx, name: Option(str, "Name of the feed to remove")):
         guild_id = str(ctx.guild.id)
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -80,9 +80,9 @@ class RSSFeed(commands.Cog):
 
         conn.close()
 
-    @rss.command(integration_types={discord.IntegrationType.guild_install}, name="set_feed_channel", description="Set the channel for RSS feed updates")
+    @rss.command(integration_types={IntegrationType.guild_install}, name="set_feed_channel", description="Set the channel for RSS feed updates")
     @default_permissions(administrator=True)
-    async def set_feed_channel(self, ctx, channel: discord.Option(discord.TextChannel, "The channel to send RSS updates to")):
+    async def set_feed_channel(self, ctx, channel: Option(TextChannel, "The channel to send RSS updates to")):
         guild_id = str(ctx.guild.id)
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -95,7 +95,7 @@ class RSSFeed(commands.Cog):
         self.logger.info(f"Set RSS feed channel to {channel.id} for guild {guild_id}")
         await ctx.respond(f"RSS feed updates will now be sent to {channel.mention}")
 
-    @rss.command(integration_types={discord.IntegrationType.guild_install}, name="list_feeds", description="List all current RSS feeds")
+    @rss.command(integration_types={IntegrationType.guild_install}, name="list_feeds", description="List all current RSS feeds")
     async def list_feeds(self, ctx):
         guild_id = str(ctx.guild.id)
         conn = self.get_connection()
@@ -122,33 +122,43 @@ class RSSFeed(commands.Cog):
         self.logger.debug("Fetched feed names from database")
         return [name[0] for name in feed_names]
 
-    @rss.command(integration_types={discord.IntegrationType.guild_install}, name="get_last_feed", description="Get the last post from an RSS feed")
-    async def get_last_feed(self, ctx, name: discord.Option(str, "Name of the feed")):
-        if name not in self.get_feed_names():
-            self.logger.warning(f"No RSS feed found with name '{name}' for guild {ctx.guild.id}")
-            await ctx.respond(f"No RSS feed found with name '{name}' in this server.\nCheck the list_feeds command to see the available feeds.")
+    @rss.command(integration_types={IntegrationType.guild_install}, name="get_last_feed", description="Get the last post from an RSS feed")
+    async def get_last_feed(self, ctx, name: Option(str, "Name of the feed")):
+        if not await self.feed_exists(ctx, name):
             return
-        guild_id = str(ctx.guild.id)
-        conn = self.get_connection()
-        cursor = conn.cursor()
 
-        cursor.execute('SELECT last_entry, url FROM feeds WHERE guild_id = ? AND name = ?', (guild_id, name))
-        result = cursor.fetchone()
-        last_entry, url = result if result else (None, None)
+        guild_id = str(ctx.guild.id)
+        last_entry, url = self.get_feed_info(guild_id, name)
 
         if not url:
-            self.logger.warning(f"No RSS feed found with name '{name}' for guild {guild_id}")
             await ctx.respond(f"No RSS feed found with name '{name}'")
-            conn.close()
             return
-        
+
         parsed_feed = feedparser.parse(url)
         if not parsed_feed.entries:
             self.logger.info(f"No entries found in the feed '{name}' for guild {guild_id}")
             await ctx.respond(f"No entries found in the feed '{name}'")
-            conn.close()
             return
 
+        await self.respond_with_feed(ctx, name, last_entry, parsed_feed)
+
+    async def feed_exists(self, ctx, name):
+        if name not in self.get_feed_names():
+            self.logger.warning(f"No RSS feed found with name '{name}' for guild {ctx.guild.id}")
+            await ctx.respond(f"No RSS feed found with name '{name}' in this server.\nCheck the list_feeds command to see the available feeds.")
+            return False
+        return True
+
+    def get_feed_info(self, guild_id, name):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT last_entry, url FROM feeds WHERE guild_id = ? AND name = ?', (guild_id, name))
+        result = cursor.fetchone()
+        conn.close()
+        return result if result else (None, None)
+
+    async def respond_with_feed(self, ctx, name, last_entry, parsed_feed):
+        guild_id = str(ctx.guild.id)
         if not last_entry:
             latest_entry = parsed_feed.entries[0]
             self.logger.info(f"Latest post from '{name}' for guild {guild_id}: {latest_entry.title}")
@@ -163,45 +173,61 @@ class RSSFeed(commands.Cog):
                 self.logger.info(f"Latest post from '{name}' for guild {guild_id}: {latest_entry.title}")
                 await ctx.respond(f"Latest post from '{name}':\n**{latest_entry.title}**\n{latest_entry.link}")
 
-        conn.close()
-
     @tasks.loop(minutes=5)
     async def check_feeds(self):
         self.logger.debug("Checking feeds for updates")
         conn = self.get_connection()
         cursor = conn.cursor()
 
-        cursor.execute('SELECT guild_id, channel_id FROM feed_channels')
-        channels = {row[0]: row[1] for row in cursor.fetchall()}
-
+        channels = self.get_channels(cursor)
         for guild_id, channel_id in channels.items():
-            channel = self.bot.get_channel(channel_id)
-            if not channel:
-                self.logger.warning(f"Channel {channel_id} not found for guild {guild_id}")
-                continue
-
-            cursor.execute('SELECT name, url, last_entry FROM feeds WHERE guild_id = ?', (guild_id,))
-            feeds = cursor.fetchall()
-
-            for name, url, last_entry in feeds:
-                parsed_feed = feedparser.parse(url)
-                if not parsed_feed.entries:
-                    self.logger.info(f"No entries found in the feed '{name}' for guild {guild_id}")
-                    continue
-
-                latest_entry = parsed_feed.entries[0]
-                if last_entry != latest_entry.id:
-                    cursor.execute('UPDATE feeds SET last_entry = ? WHERE guild_id = ? AND name = ?',
-                                   (latest_entry.id, guild_id, name))
-                    await channel.send(
-                        f"New post in '{name}':\n"
-                        f"**{latest_entry.title}**\n"
-                        f"{latest_entry.link}"
-                    )
-                    self.logger.info(f"New post in '{name}' for guild {guild_id}: {latest_entry.title}")
+            await self.process_guild_feeds(cursor, guild_id, channel_id)
 
         conn.commit()
         conn.close()
+
+    def get_channels(self, cursor):
+        cursor.execute('SELECT guild_id, channel_id FROM feed_channels')
+        return {row[0]: row[1] for row in cursor.fetchall()}
+
+    async def process_guild_feeds(self, cursor, guild_id, channel_id):
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            self.logger.warning(f"Channel {channel_id} not found for guild {guild_id}")
+            return
+
+        cursor.execute('SELECT name, url, last_entry FROM feeds WHERE guild_id = ?', (guild_id,))
+        feeds = cursor.fetchall()
+
+        for name, url, last_entry in feeds:
+            await self.process_feed(cursor, guild_id, (name, url, last_entry), channel)
+
+    async def process_feed(self, cursor, guild_id, feed, channel):
+        name, url, last_entry = feed
+        parsed_feed = feedparser.parse(url)
+        if not parsed_feed.entries:
+            self.logger.info(f"No entries found in the feed '{name}' for guild {guild_id}")
+            return
+
+        new_entries = self.get_new_entries(parsed_feed, last_entry)
+        if new_entries:
+            cursor.execute('UPDATE feeds SET last_entry = ? WHERE guild_id = ? AND name = ?',
+                           (new_entries[0].id, guild_id, name))
+            for entry in reversed(new_entries):
+                await channel.send(
+                    f"New post in '{name}':\n"
+                    f"**{entry.title}**\n"
+                    f"{entry.link}"
+                )
+                self.logger.info(f"New post in '{name}' for guild {guild_id}: {entry.title}")
+
+    def get_new_entries(self, parsed_feed, last_entry):
+        new_entries = []
+        for entry in parsed_feed.entries:
+            if entry.id == last_entry:
+                break
+            new_entries.append(entry)
+        return new_entries
 
     @check_feeds.before_loop
     async def before_check_feeds(self):
