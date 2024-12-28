@@ -11,3 +11,4 @@ pydub
 openai
 tiktoken
 feedparser
+beautifulsoup4
