@@ -1,18 +1,9 @@
-import asyncio
 import logging
-from pathlib import Path
-import uuid
-import validators
 import discord
-from discord.interactions import Interaction
 from discord.ext import commands, tasks
-from discord.ui import Button, View
 from dotenv import load_dotenv
 import os
-import yt_dlp as youtube_dl
 import datetime
-from subclasses import filebin, glyph_tools
-import spotipy
 
 make_ephemeral = False
 COOKIES_FILE = 'cookies.txt'
