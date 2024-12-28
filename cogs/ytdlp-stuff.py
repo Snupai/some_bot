@@ -34,14 +34,38 @@ class YoutubeDLPCog(commands.Cog):
 
         await ctx.defer()
 
+        if not await self.validate_url(ctx, url):
+            return
+
+        url = await self.handle_spotify_url(url)
+
+        info = await self.extract_info(ctx, url)
+        if not info:
+            return
+
+        title, begin, end = await self.prepare_download(ctx, info, begin, end)
+        if not title:
+            return
+
+        if not await self.download_audio(ctx, url, title):
+            return
+
+        if not await self.trim_audio(ctx, title, begin, end):
+            return
+
+        await self.send_audio(ctx, title)
+
+    async def validate_url(self, ctx, url):
         try:
             if not validators.url(url):
                 await ctx.respond(content="Invalid URL provided.")
-                return
+                return False
         except Exception as e:
             await ctx.respond(content=f"Error validating URL: {str(e)}", ephemeral=True)
-            return
+            return False
+        return True
 
+    async def handle_spotify_url(self, url):
         if "spotify.com" in url:
             sp = spotipy.Spotify(auth_manager=spotipy.oauth2.SpotifyClientCredentials(
                 client_id=os.getenv('SPOTIFY_CLIENT_ID'),
@@ -60,7 +84,9 @@ class YoutubeDLPCog(commands.Cog):
             with youtube_dl.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(search_query, download=False)
                 url = info['entries'][0]['webpage_url']
-        
+        return url
+
+    async def extract_info(self, ctx, url):
         ydl = youtube_dl.YoutubeDL({
             'cookiefile': COOKIES_FILE,
             'quiet': True,
@@ -76,8 +102,10 @@ class YoutubeDLPCog(commands.Cog):
             info = ydl.extract_info(url, download=False)
         except youtube_dl.DownloadError:
             await ctx.respond(content="Error extracting info from the URL. Please check if the video is available and try again.", ephemeral=True)
-            return
+            return None
+        return info
 
+    async def prepare_download(self, ctx, info, begin, end):
         if end is None:
             end = info['duration']
         title = str(info['title'])  # Fixed syntax for type conversion
@@ -90,12 +118,27 @@ class YoutubeDLPCog(commands.Cog):
             end = float(end)
         except ValueError:
             await ctx.respond(content="Invalid begin or end time.", ephemeral=True)
-            return
+            return None, None, None
 
-        if begin < 0.0 or end < 0.0 or begin > end or end > info['duration']:
-            await ctx.respond(content="Invalid begin or end time.", ephemeral=True)
-            return
+        if begin < 0.0:
+            await ctx.respond(content="Begin time cannot be negative.", ephemeral=True)
+            return None, None, None
 
+        if end < 0.0:
+            await ctx.respond(content="End time cannot be negative.", ephemeral=True)
+            return None, None, None
+
+        if begin > end:
+            await ctx.respond(content="Begin time cannot be greater than end time.", ephemeral=True)
+            return None, None, None
+
+        if end > info['duration']:
+            await ctx.respond(content="End time cannot be greater than the duration of the audio.", ephemeral=True)
+            return None, None, None
+
+        return title, begin, end
+
+    async def download_audio(self, ctx, url, title):
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': f'{title}.%(ext)s',
@@ -117,16 +160,20 @@ class YoutubeDLPCog(commands.Cog):
                 await loop.run_in_executor(None, lambda: ydl.download([url]))
             except youtube_dl.DownloadError as e:
                 await ctx.respond(content=f"Error downloading the audio file: {e}", ephemeral=True)
-                return
+                return False
+        return True
 
+    async def trim_audio(self, ctx, title, begin, end):
         ffmpeg_cmd = ['ffmpeg', '-i', f'{title}.opus', '-ab', '189k', '-ss', str(begin), '-t', str(end - begin), '-acodec', 'libopus', f'{title}.ogg']
         process = await asyncio.create_subprocess_exec(*ffmpeg_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, stderr = await process.communicate()
 
         if process.returncode != 0:
             await ctx.respond(content=f"Error trimming the audio file: {stderr.decode()}", ephemeral=True)
-            return
+            return False
+        return True
 
+    async def send_audio(self, ctx, title):
         try:
             filepath = f'{title}.ogg'
             self.logger.debug(f"Calculated title: {title}")
