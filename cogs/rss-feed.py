@@ -58,7 +58,7 @@ class RSSFeed(commands.Cog):
             return True
         return False
     
-    rss = SlashCommandGroup(name="rss", description="Manage RSS feeds")
+    rss = SlashCommandGroup(integration_types={IntegrationType.guild_install}, name="rss", description="Manage RSS feeds")
 
     @rss.command(integration_types={IntegrationType.guild_install}, name="add_feed", description="Add a new RSS feed to monitor")
     @default_permissions(administrator=True)
