@@ -4,6 +4,9 @@ from discord.ext import commands, tasks
 import feedparser
 import sqlite3
 import logging
+import requests
+from urllib.parse import urlparse
+from bs4 import BeautifulSoup
 
 class RSSFeed(commands.Cog):
     def __init__(self, bot):
@@ -190,7 +193,11 @@ class RSSFeed(commands.Cog):
             latest_entry = next((entry for entry in parsed_feed.entries if entry.id == last_entry), None)
             if not latest_entry:
                 latest_entry = parsed_feed.entries[0]
-    
+        
+        is_spiegel_plus = self.is_spiegel_plus(latest_entry.link)
+        if is_spiegel_plus:
+            latest_entry.title = f"(S+) {latest_entry.title}"
+
         embed = discord.Embed(
             title=latest_entry.title,
             url=latest_entry.link,
@@ -207,12 +214,18 @@ class RSSFeed(commands.Cog):
         embed.add_field(name="Category", value=latest_entry.get("category", []), inline=False)
         embed.add_field(name="Published Date", value=latest_entry.published, inline=False)
         embed.set_author(name=parsed_feed.feed.title)
+        if is_spiegel_plus:
+            embed.add_field(name="RemovePaywall", value=f"[Versuche es aus!](https://www.removepaywall.com/search?url={latest_entry.link})", inline=False)
         embed.set_footer(text=f"RSS Feed: {name}")
 
         self.logger.info(f"Sending post from '{name}' for guild {guild_id}: {latest_entry.title}")
         await ctx.respond(embed=embed)
 
     async def send_feed_update(self, channel, name, entry, parsed_feed: feedparser.FeedParserDict):
+        is_spiegel_plus = self.is_spiegel_plus(entry.link)
+        if is_spiegel_plus:
+            entry.title = f"(S+) {entry.title}"
+
         embed = discord.Embed(
             title=entry.title,
             url=entry.link,
@@ -229,9 +242,41 @@ class RSSFeed(commands.Cog):
         embed.add_field(name="Category", value=entry.get("category", []), inline=False)
         embed.add_field(name="Published Date", value=entry.published, inline=False)
         embed.set_author(name=parsed_feed.feed.title)
+        if is_spiegel_plus:
+            embed.add_field(name="RemovePaywall", value=f"[Versuche es aus!](https://www.removepaywall.com/search?url={entry.link})", inline=False)
         embed.set_footer(text=f"RSS Feed: {name}")
 
         await channel.send(embed=embed)
+
+    def is_spiegel_article(self, article_url):
+        try:
+            # Parse the URL to check the domain
+            parsed_url = urlparse(article_url)
+            return 'spiegel.de' in parsed_url.netloc
+        except Exception as e:
+            print(f"Error checking URL validity: {e}")
+            return False
+
+    def is_spiegel_plus(self, article_url):
+        if not self.is_spiegel_article(article_url):
+            print("The provided URL is not a SPIEGEL article.")
+            return None
+        
+        try:
+            # Fetch the article page
+            response = requests.get(article_url)
+            response.raise_for_status()  # Raise an error if the request failed
+            soup = BeautifulSoup(response.content, 'html.parser')
+
+            # Find the <meta> tag with property="og:title"
+            meta_tag = soup.find('meta', {'property': 'og:title'})
+            if meta_tag and meta_tag.get('content', '').startswith('(S+)'):
+                return True  # Indicates a SPIEGEL+ article
+
+            return False  # Otherwise, it's likely free to read
+        except Exception as e:
+            print(f"Error checking article: {e}")
+            return None
 
     @tasks.loop(minutes=5)
     async def check_feeds(self):
