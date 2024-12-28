@@ -8,10 +8,10 @@ import logging
 class RSSFeed(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.logger = logging.getLogger('bot.py')
         self.db_path = 'rss_feed.sqlite'
         self.initialize_database()
         self.check_feeds.start()
-        self.logger = logging.getLogger('bot.py')
 
     def cog_unload(self):
         self.check_feeds.cancel()
@@ -39,7 +39,7 @@ class RSSFeed(commands.Cog):
 
         conn.commit()
         conn.close()
-        self.logger.info("Database initialized")
+        self.logger.debug("Database initialized")
 
     def get_connection(self):
         self.logger.debug("Getting database connection")
