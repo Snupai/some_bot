@@ -14,6 +14,7 @@ import yt_dlp as youtube_dl
 import spotipy
 from pydub import AudioSegment
 import base64
+import sqlite3
 
 COOKIES_FILE = 'cookies.txt'
 
@@ -21,8 +22,21 @@ class YoutubeDLPCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.logger = logging.getLogger('bot.py')
+        
+        
+    async def is_user_allowed(self, user):
+        # check the allowed_users.sqlite file for the user
+        conn = sqlite3.connect('allowed_users.sqlite')
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id FROM allowed_users WHERE user_id = ?', (user.id,))
+        result = cursor.fetchone()
+        if result:
+            return True
+        return False
+    
+    ytdlp_cog = discord.SlashCommandGroup(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="ytdlp", description="Youtube-dlp API")
 
-    @discord.slash_command(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="dl_trim", description="downloads audio from a URL with a specific time range")
+    @ytdlp_cog.command(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="dl_trim", description="downloads audio from a URL with a specific time range")
     async def dl_trim(self, ctx: discord.ApplicationContext,
                     url: str = discord.Option(name="audio_url", description="The audio file URL", required=True),
                     begin: float = discord.Option(name="start_time", description="The time to start playing the audio in seconds", default=0.0),
@@ -30,6 +44,9 @@ class YoutubeDLPCog(commands.Cog):
         """
         Command to play audio from a URL at a specific time.
         """
+        if not await self.is_user_allowed(ctx.author):
+            await ctx.respond(content="You are not allowed to use this command.", ephemeral=True)
+            return
         self.logger.info(f"{ctx.author} used /dl_trim command in {ctx.channel} on {ctx.guild}.")
 
         await ctx.defer()
@@ -201,13 +218,16 @@ class YoutubeDLPCog(commands.Cog):
                 if audio_file.is_file():
                     audio_file.unlink()
 
-    @discord.slash_command(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="get-yt-link", description="Get the Youtube link based of a link to some music e.g. Spotify link")
+    @ytdlp_cog.command(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="get-yt-link", description="Get the Youtube link based of a link to some music e.g. Spotify link")
     async def get_yt_link(self, ctx: discord.ApplicationContext, 
                     url: str = discord.Option(name="url", description="The link to the music", required=True),
                     ephemeral: str = discord.Option(name="ephemeral", description="Whether to send the response as an ephemeral message", required=False, default="True", choices=["True", "False"])):
         """
         Command to get the Youtube link based of a link to some music e.g. Spotify link
         """
+        if not await self.is_user_allowed(ctx.author):
+            await ctx.respond(content="You are not allowed to use this command.", ephemeral=True)
+            return
         ephemeral = True if ephemeral == "True" else False
 
         self.logger.info(f"{ctx.author} used /get-yt-link command in {ctx.channel} on {ctx.guild} with URL: {url} and ephemeral: {ephemeral}.")
