@@ -4,12 +4,12 @@ if __name__ == "__main__":
 
 import discord
 from discord.ext import commands
-import asyncio
 import logging
 from openai import OpenAI
 import os
 import enum
 import re
+import sqlite3
 
 class PplxAiModels(enum.Enum):
     LLAMA_3_1_SONAR_SMALL_128K_ONLINE = "llama-3.1-sonar-small-128k-online"
@@ -21,6 +21,8 @@ class PPLXAICog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.logger = logging.getLogger('bot.py')
+        
+    pplxai = discord.SlashCommandGroup(integration_types={discord.IntegrationType.user_install}, name="pplx-ai", description="Perplexity AI API")
 
     def split_text(self, text: str, max_length: int = 2000) -> list[str]:
         """
@@ -34,14 +36,46 @@ class PPLXAICog(commands.Cog):
             list[str]: A list of segments of the text.
         """
 
-        def find_split_point(text, max_len, min_len, priority_patterns):
-            for pattern in priority_patterns:
-                matches = list(re.finditer(pattern, text))
-                for match in reversed(matches):
-                    if min_len <= match.start() <= max_len:
-                        return match.start()
-            return None
+        code_block_pattern = re.compile(r'```(.*?)\n(.*?)(?=\n```|\Z)', re.DOTALL)
+        segments = []
 
+        while len(text) > max_length:
+            match = code_block_pattern.search(text)
+            if match:
+                text = self._handle_code_block(text, match, segments, max_length)
+            else:
+                text = self._handle_text_segment(text, segments, max_length)
+
+        if text:
+            segments.append(text)
+
+        return segments
+
+    def _handle_code_block(self, text, match, segments, max_length):
+        start, end = match.span()
+        if start > 0:
+            segments.append(text[:start].rstrip())
+            text = text[start:]
+
+        code_block_content = match.group(0)
+        if len(code_block_content) > max_length:
+            split_code_blocks = self.split_text(code_block_content, max_length)
+            segments.extend(split_code_blocks)
+        else:
+            segments.append(code_block_content)
+
+        return text[end:].lstrip()
+
+    def _handle_text_segment(self, text, segments, max_length):
+        split_point = self._find_split_point(text, max_length)
+        if split_point is None:
+            split_point = max_length
+
+        segments.append(text[:split_point].rstrip())
+        return text[split_point:].lstrip()
+
+    def _find_split_point(self, text, max_len):
+        min_len = max_len // 2
         priority_patterns = [
             r'\n# ',      # Highest priority
             r'\n## ',     # Next priority
@@ -50,48 +84,34 @@ class PPLXAICog(commands.Cog):
             r'\n\n',     # Two newlines
             r'\n'         # Single newline
         ]
+        for pattern in priority_patterns:
+            matches = list(re.finditer(pattern, text))
+            for match in reversed(matches):
+                if min_len <= match.start() <= max_len:
+                    return match.start()
+        return None
 
-        code_block_pattern = re.compile(r'```(.*?)\n(.*?)(?=\n```|\Z)', re.DOTALL)
+    async def is_user_allowed(self, user):
+        # check the allowed_users.sqlite file for the user
+        conn = sqlite3.connect('allowed_users.sqlite')
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id FROM allowed_users WHERE user_id = ?', (user.id,))
+        result = cursor.fetchone()
+        if result:
+            return True
+        return False
+        
 
-        min_length = max_length // 2
-        segments = []
-
-        while len(text) > max_length:
-            if match := code_block_pattern.search(text):
-                start, end = match.span()
-                if start > 0:
-                    segments.append(text[:start].rstrip())
-                    text = text[start:]
-
-                code_block_content = match.group(0)
-                if len(code_block_content) > max_length:
-                    split_code_blocks = self.split_text(code_block_content, max_length)
-                    segments.extend(split_code_blocks)
-                else:
-                    segments.append(code_block_content)
-
-                text = text[end:].lstrip()
-            else:
-                split_point = find_split_point(text, max_length, min_length, priority_patterns)
-                if split_point is None:
-                    split_point = max_length
-
-                segments.append(text[:split_point].rstrip())
-                text = text[split_point:].lstrip()
-
-        if text:
-            segments.append(text)
-
-        return segments
-
-
-    @discord.slash_command(integration_types={discord.IntegrationType.user_install}, name="pplx-ai", description="Ask PPLX AI something")
-    async def pplx_ai(self, ctx: discord.ApplicationContext,
+    @pplxai.command(integration_types={discord.IntegrationType.user_install}, name="ask", description="Ask Perplexity AI something")
+    async def ask_pplx_ai(self, ctx: discord.ApplicationContext,
                     prompt: str = discord.Option(name="prompt", description="The prompt to send to PPLX AI", required=True),
                     model: str = discord.Option(name="model", description="The model to use", required=False, choices=[x.value for x in PplxAiModels])):
         """
         Command to ask PPLX AI something
         """
+        if not await self.is_user_allowed(ctx.author):
+            await ctx.respond(content="You are not allowed to use this command.", ephemeral=True)
+            return
         self.logger.info(f"{ctx.author} used /pplx-ai command in {ctx.channel} on {ctx.guild}.")
 
         await ctx.defer()
