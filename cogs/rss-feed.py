@@ -7,13 +7,16 @@ import logging
 import requests
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
+import datetime
 
 class RSSFeed(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.logger = logging.getLogger('bot.py')
         self.db_path = 'rss_feed.sqlite'
+        self.cache_db_path = 'rss_feed_cache.sqlite'
         self.initialize_database()
+        self.initialize_cache_database()
         self.check_feeds.start()
 
     def cog_unload(self):
@@ -36,6 +39,7 @@ class RSSFeed(commands.Cog):
                 name TEXT,
                 url TEXT,
                 last_entry TEXT,
+                notification_role_id INTEGER,
                 PRIMARY KEY (guild_id, name)
             )
         ''')
@@ -44,9 +48,103 @@ class RSSFeed(commands.Cog):
         conn.close()
         self.logger.debug("Database initialized")
 
+    def initialize_cache_database(self):
+        conn = sqlite3.connect(self.cache_db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS feed_cache (
+                url TEXT PRIMARY KEY,
+                last_entry TEXT
+            )
+        ''')
+
+        conn.commit()
+        conn.close()
+        self.logger.debug("Cache database initialized")
+
+    def create_feed_table(self, url):
+        conn = self.get_cache_connection()
+        cursor = conn.cursor()
+        table_name = self.get_table_name(url)
+        cursor.execute(f'''
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                link TEXT,
+                description TEXT,
+                enclosure_href TEXT,
+                category TEXT,
+                pub_date TEXT,
+                is_spiegel_plus BOOLEAN,
+                remove_paywall_link TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        self.logger.debug(f"Created cache table for URL: {url}")
+
+    def get_table_name(self, url):
+        return f"feed_{hash(url)}"
+
     def get_connection(self):
         self.logger.debug("Getting database connection")
         return sqlite3.connect(self.db_path)
+
+    def get_cache_connection(self):
+        self.logger.debug("Getting cache database connection")
+        return sqlite3.connect(self.cache_db_path)
+
+    def update_cache(self, url, entries):
+        self.create_feed_table(url)
+        conn = self.get_cache_connection()
+        cursor = conn.cursor()
+        table_name = self.get_table_name(url)
+
+        for entry in entries:
+            is_spiegel_plus = self.is_spiegel_plus(entry.link)
+            if is_spiegel_plus:
+                entry.title = f"(S+) {entry.title}"
+                remove_paywall_link = f"https://www.removepaywall.com/search?url={entry.link}"
+            else:
+                remove_paywall_link = None
+
+            cursor.execute(f'''
+                INSERT OR REPLACE INTO {table_name} (id, title, link, description, enclosure_href, category, pub_date, is_spiegel_plus, remove_paywall_link)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                entry.id,
+                entry.title,
+                entry.link,
+                entry.description,
+                entry.enclosures[0].href if 'enclosures' in entry and entry.enclosures else None,
+                entry.get("category", ""),
+                entry.published,
+                is_spiegel_plus,
+                remove_paywall_link
+            ))
+
+        cursor.execute('INSERT OR REPLACE INTO feed_cache (url, last_entry) VALUES (?, ?)', (url, entries[0].id))
+        conn.commit()
+        conn.close()
+        self.logger.debug(f"Updated cache for URL: {url}")
+
+    def get_last_entry_from_cache(self, url):
+        conn = self.get_cache_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT last_entry FROM feed_cache WHERE url = ?', (url,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else None
+
+    def get_cached_entries(self, url):
+        conn = self.get_cache_connection()
+        cursor = conn.cursor()
+        table_name = self.get_table_name(url)
+        cursor.execute(f'SELECT * FROM {table_name}')
+        entries = cursor.fetchall()
+        conn.close()
+        return entries
 
     async def is_user_allowed(self, user):
         # check the allowed_users.sqlite file for the user
@@ -60,9 +158,14 @@ class RSSFeed(commands.Cog):
     
     rss = SlashCommandGroup(integration_types={IntegrationType.guild_install}, name="rss", description="Manage RSS feeds")
 
-    @rss.command(integration_types={IntegrationType.guild_install}, name="add_feed", description="Add a new RSS feed to monitor")
+    @rss.command(integration_types={IntegrationType.guild_install}, 
+                 name="add_feed", 
+                 description="Add a new RSS feed to monitor")
     @default_permissions(administrator=True)
-    async def add_feed(self, ctx, name: Option(str, "Name of the feed"), url: Option(str, "URL of the RSS feed")):
+    async def add_feed(self, ctx, 
+                       name: Option(str, "Name of the feed"), 
+                       url: Option(str, "URL of the RSS feed"),
+                       notification_role: Option(discord.Role, "Role to send notifications to", required=False)):
         if not await self.is_user_allowed(ctx.author):
             await ctx.respond(content="You are not allowed to use this command.", ephemeral=True)
             return
@@ -70,13 +173,44 @@ class RSSFeed(commands.Cog):
         conn = self.get_connection()
         cursor = conn.cursor()
 
-        cursor.execute('INSERT OR REPLACE INTO feeds (guild_id, name, url, last_entry) VALUES (?, ?, ?, ?)',
-                       (guild_id, name, url, None))
+        role_id = notification_role.id if notification_role else None
+        cursor.execute('INSERT OR REPLACE INTO feeds (guild_id, name, url, last_entry, notification_role_id) VALUES (?, ?, ?, ?, ?)',
+                       (guild_id, name, url, None, role_id))
         conn.commit()
         conn.close()
 
         self.logger.info(f"Added RSS feed '{name}' with URL: {url} for guild {guild_id}")
         await ctx.respond(f"Added RSS feed '{name}' with URL: {url}")
+
+    @rss.command(integration_types={IntegrationType.guild_install}, 
+                 name="edit_feed", 
+                 description="Edit an existing RSS feed")
+    @default_permissions(administrator=True)
+    async def edit_feed(self, ctx, 
+                        name: Option(str, "Name of the feed to edit"), 
+                        new_url: Option(str, "New URL of the RSS feed", required=False),
+                        new_notif_role: Option(discord.Role, "New role to send notifications to", required=False)):
+        if not await self.is_user_allowed(ctx.author):
+            await ctx.respond(content="You are not allowed to use this command.", ephemeral=True)
+            return
+        if not new_url and not new_notif_role:
+            await ctx.respond(content="You must provide at least one new value (new_url or new_notif_role).", ephemeral=True)
+            return
+
+        guild_id = str(ctx.guild.id)
+        conn = self.get_connection()
+        cursor = conn.cursor()
+
+        if new_url:
+            cursor.execute('UPDATE feeds SET url = ? WHERE guild_id = ? AND name = ?', (new_url, guild_id, name))
+        if new_notif_role:
+            cursor.execute('UPDATE feeds SET notification_role_id = ? WHERE guild_id = ? AND name = ?', (new_notif_role.id, guild_id, name))
+
+        conn.commit()
+        conn.close()
+
+        self.logger.info(f"Edited RSS feed '{name}' for guild {guild_id}")
+        await ctx.respond(f"Edited RSS feed '{name}'")
 
     @rss.command(integration_types={IntegrationType.guild_install}, name="remove_feed", description="Remove an RSS feed from monitoring")
     @default_permissions(administrator=True)
@@ -222,31 +356,49 @@ class RSSFeed(commands.Cog):
         await ctx.respond(embed=embed)
 
     async def send_feed_update(self, channel, name, entry, parsed_feed: feedparser.FeedParserDict):
-        is_spiegel_plus = self.is_spiegel_plus(entry.link)
-        if is_spiegel_plus:
-            entry.title = f"(S+) {entry.title}"
+        embed = self.create_embed(entry, parsed_feed, name)
+        role = await self.get_notification_role(channel.guild.id, name)
+        
+        if role:
+            await channel.send(content=role.mention, embed=embed)
+        else:
+            await channel.send(embed=embed)
 
+    def create_embed(self, entry, parsed_feed, name):
         embed = discord.Embed(
             title=entry.title,
             url=entry.link,
             description=entry.description,
             color=discord.Color.blue()
         )
-        
+
         if 'enclosures' in entry:
             for enclosure in entry.enclosures:
                 if enclosure.type.startswith('image'):
                     embed.set_image(url=enclosure.href)
                     break
-        
+
         embed.add_field(name="Category", value=entry.get("category", []), inline=False)
         embed.add_field(name="Published Date", value=entry.published, inline=False)
         embed.set_author(name=parsed_feed.feed.title)
-        if is_spiegel_plus:
-            embed.add_field(name="RemovePaywall", value=f"[Versuche es aus!](https://www.removepaywall.com/search?url={entry.link})", inline=False)
+        if entry.is_spiegel_plus:
+            embed.add_field(name="RemovePaywall", value=f"[Versuche es aus!]({entry.remove_paywall_link})", inline=False)
         embed.set_footer(text=f"RSS Feed: {name}")
 
-        await channel.send(embed=embed)
+        return embed
+
+    async def get_notification_role(self, guild_id, name):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT notification_role_id FROM feeds WHERE guild_id = ? AND name = ?', (str(guild_id), name))
+        role_id = cursor.fetchone()
+        conn.close()
+
+        if role_id and role_id[0]:
+            guild = self.bot.get_guild(int(guild_id))
+            if guild:
+                return guild.get_role(role_id[0])
+        return None
 
     def is_spiegel_article(self, article_url):
         try:
@@ -277,6 +429,21 @@ class RSSFeed(commands.Cog):
         except Exception as e:
             print(f"Error checking article: {e}")
             return None
+
+    def is_recent_entry(self, pub_date):
+        entry_time = datetime.datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %z")
+        current_time = datetime.datetime.now(datetime.timezone.utc)
+        time_difference = current_time - entry_time
+        return time_difference.total_seconds() <= 12 * 3600
+
+    def get_new_entries(self, parsed_feed, last_entry):
+        new_entries = []
+        for entry in parsed_feed.entries:
+            if entry.id == last_entry:
+                break
+            if self.is_recent_entry(entry.published):
+                new_entries.append(entry)
+        return new_entries
 
     @tasks.loop(minutes=5)
     async def check_feeds(self):
@@ -309,6 +476,10 @@ class RSSFeed(commands.Cog):
 
     async def process_feed(self, cursor, guild_id, feed, channel):
         name, url, last_entry = feed
+        cached_last_entry = self.get_last_entry_from_cache(url)
+        if cached_last_entry:
+            last_entry = cached_last_entry
+
         parsed_feed = feedparser.parse(url)
         if not parsed_feed.entries:
             self.logger.debug(f"No entries found in the feed '{name}' for guild {guild_id}")
@@ -318,17 +489,10 @@ class RSSFeed(commands.Cog):
         if new_entries:
             cursor.execute('UPDATE feeds SET last_entry = ? WHERE guild_id = ? AND name = ?',
                            (new_entries[0].id, guild_id, name))
+            self.update_cache(url, new_entries)
             for entry in reversed(new_entries):
                 await self.send_feed_update(channel, name, entry, parsed_feed)
                 self.logger.debug(f"New post in '{name}' for guild {guild_id}: {entry.title}")
-
-    def get_new_entries(self, parsed_feed, last_entry):
-        new_entries = []
-        for entry in parsed_feed.entries:
-            if entry.id == last_entry:
-                break
-            new_entries.append(entry)
-        return new_entries
 
     @check_feeds.before_loop
     async def before_check_feeds(self):
