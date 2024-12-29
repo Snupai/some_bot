@@ -5,7 +5,6 @@ from dotenv import load_dotenv
 import os
 import datetime
 
-make_ephemeral = False
 COOKIES_FILE = 'cookies.txt'
 
 GUILD_INSTALL_LINK = "https://discord.com/oauth2/authorize?client_id=1219270011164688514&permissions=1759214275783799&redirect_uri=https%3A%2F%2Fdiscord.com%2Foauth2%2Fauthorize%3Fclient_id%3D1219270011164688514&integration_type=0&scope=bot"
