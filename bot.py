@@ -4,6 +4,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 import os
 import datetime
+import time
 
 COOKIES_FILE = 'cookies.txt'
 
@@ -19,9 +20,12 @@ intents.members = True
 intents.message_content = True
 intents.voice_states = True
 
-bot = commands.AutoShardedBot(intents=intents, sync_commands=True, help_command=None)
+bot = commands.AutoShardedBot(intents=intents, sync_commands=True)
 
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+# Set the start time when the bot starts
+bot.start_time = time.time()
 
 # Create a logger with timestamp in the file name
 def setup_logger():
@@ -108,6 +112,25 @@ async def change_activity():
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.playing, name=activity))
 
 change_activity.start()
+
+@bot.slash_command(integration_types={discord.IntegrationType.user_install}, name="reload_cogs", description="Reload all cogs.")
+@commands.is_owner()
+async def reload_cogs(ctx: discord.ApplicationContext):
+    """
+    Reload all cogs.
+    """
+    for filename in os.listdir('./cogs'):
+        if filename.endswith('.py'):
+            try:
+                bot.reload_extension(f'cogs.{filename[:-3]}')
+                logger.info(f"Reloaded extension: {filename}")
+            except Exception as e:
+                logger.error(f"Failed to reload extension: {filename}")
+                logger.error(f"Error: {str(e)}")
+                await ctx.respond(f"Error reloading extension: {filename}\nError: {str(e)}", ephemeral=True)
+                return
+    await bot.sync_commands()
+    await ctx.respond("All cogs reloaded successfully.", ephemeral=True)
 
 
 # Run the bot
