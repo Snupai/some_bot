@@ -43,8 +43,17 @@ class GenericCog(commands.Cog):
             f"<:download:1322186564461264940> RestAction: `{rest_latency:.0f}ms`"
         ))
 
+    @commands.slash_command(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="uptime", description="Returns the bot's uptime")
+    async def uptime(self, ctx: discord.ApplicationContext):
+        """
+        A slash command to return the bot's uptime.
+        """
+        current_time = time.time()
+        uptime_seconds = int(current_time - self.bot.start_time)
+        uptime_string = str(datetime.timedelta(seconds=uptime_seconds))
+        await ctx.respond(f"Uptime: {uptime_string}", ephemeral=True)
 
-    @commands.slash_command(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install})
+    @commands.slash_command(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="about", description="Display information about the bot.")
     async def about(self, ctx):
         """
         Command to display information about the bot.
@@ -68,33 +77,22 @@ class GenericCog(commands.Cog):
         # Add the button row to the embed
         await ctx.respond(embed=embed, view=row, ephemeral=True)
 
-    @commands.slash_command(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="help")
-    async def help(self, ctx):
+    @commands.slash_command(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="shards", description="Display shard information.")
+    async def shards(self, ctx):
         """
-        Command to display the help message.
+        Command to display shard information.
         """
-        self.logger.info(f"{ctx.author} used /help command in {ctx.channel} on {ctx.guild}.")
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     
-        # Create an embed
-        embed = discord.Embed(title="Help")
+        shard_info = []
+        for shard_id, shard in self.bot.shards.items():
+            shard_info.append(f"Shard ID: {shard_id}, Latency: {shard.latency * 1000:.2f}ms")
 
-        if ctx.guild:
-            # Guild-specific commands
-            embed.description = "Some guild-specific commands:"
-            embed.add_field(name="/rss add_feed", value="Add a new RSS feed to monitor.", inline=False)
-            embed.add_field(name="/rss remove_feed", value="Remove an RSS feed from monitoring.", inline=False)
-            embed.add_field(name="/rss set_feed_channel", value="Set the channel for RSS feed updates.", inline=False)
-            embed.add_field(name="/rss list_feeds", value="List all current RSS feeds.", inline=False)
-            embed.add_field(name="/rss get_last_feed", value="Get the last post from an RSS feed.", inline=False)
-        # User-specific commands
-        embed.description = "Some user-specific commands:"
-        embed.add_field(name="/ping", value="Check if the bot is online.", inline=False)
-        embed.add_field(name="/about", value="Display information about the bot.", inline=False)
-        embed.add_field(name="/get_yt_link", value="Get the Youtube link to a Spotify song.", inline=False)
-        embed.add_field(name="/dl_trim", value="Download and trim a YouTube video. You can also provide a Spotify song link.", inline=False)
-        embed.add_field(name="/help", value="Display this help message.", inline=False)
+        shard_info_string = "\n".join(shard_info)
+        guild_shard_id = ctx.guild.shard_id if ctx.guild else "N/A"
 
-        embed.set_footer(text=f"Meaw~ | {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        embed = discord.Embed(title="Shard Information")
+        embed.description = f"```\n{shard_info_string}\n```"
+        embed.add_field(name="Guild Shard ID", value=guild_shard_id, inline=True)
+        embed.set_footer(text=f"Requested by {ctx.author} | {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
         await ctx.respond(embed=embed, ephemeral=True)
 
