@@ -96,7 +96,7 @@ class RSSFeed(commands.Cog):
         conn = sqlite3.connect(self.db_path)
         return conn
         
-    rss = SlashCommandGroup(name="rss", description="Manage RSS feeds")
+    rss = SlashCommandGroup(integration_types={discord.IntegrationType.guild_install}, name="rss", description="Manage RSS feeds")
 
     def add_entry_to_database(self, table, id, **kwargs):
         conn = self.get_connection()
