@@ -141,9 +141,10 @@ class RSSFeed(commands.Cog):
     @rss.command(integration_types={IntegrationType.guild_install}, name="add_feed", description="Add a new RSS feed to monitor")
     @default_permissions(administrator=True)
     async def add_feed(self, ctx: discord.ApplicationContext, 
-                       name: Option(str, "Name of the feed"), 
-                       url: Option(str, "URL of the RSS feed"), 
-                       notification_role: Option(discord.Role, "Role to send notifications to", required=False)):
+                       name: str = Option(str, description="Name of the feed", required=True), 
+                       url: str = Option(str, description="URL of the RSS feed", required=True), 
+                       feed_channel: discord.TextChannel = Option(discord.TextChannel, description="Channel to send notifications to", required=True),
+                       notification_role: discord.Role= Option(discord.Role, description="Role to send notifications to", required=False)):
         
         if not await self.is_user_allowed(ctx.author):
             await ctx.respond(content="You are not allowed to use this command.", ephemeral=True)
@@ -165,44 +166,43 @@ class RSSFeed(commands.Cog):
     def remove_feed_subscription_from_database(self, name: str, guild_id: str):
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT id FROM FeedSubscription WHERE name = ?', (name,))
-        result = cursor.fetchone()
+        cursor.execute('SELECT id, guild_channel_id FROM FeedSubscription WHERE name = ?', (name,))
+        result = cursor.fetchall()
         if not result:
             self.logger.debug(f"No FeedSubscription found with name '{name}'")
             conn.close()
             return None
-        id = result[0]
-        feed_id = result[1]
-        guild_channel_id = result[2]
-        # check if the guild_id matches the guild_id in the GuildChannel table under the guild_channel_id
-        cursor.execute('SELECT discord_guild_id FROM GuildChannel WHERE id = ?', (guild_channel_id,))
-        result = cursor.fetchone()
-        if not result:
-            self.logger.debug(f"No GuildChannel found with id '{guild_channel_id}'")
-            conn.close()
-            return None
-        discord_guild_id: str = result[2]
-        if discord_guild_id != guild_id:
-            self.logger.debug(f"GuildChannel with id '{guild_channel_id}' does not belong to guild '{guild_id}'")
-            conn.close()
-            return None
-        cursor.execute('DELETE FROM FeedSubscription WHERE id = ?', (id,))
-        conn.commit()
+        final_id = None
+        for id, guild_channel_id in result:
+            # check if the guild_id matches the guild_id in the GuildChannel table under the guild_channel_id
+            cursor.execute('SELECT discord_guild_id FROM GuildChannel WHERE id = ?', (guild_channel_id,))
+            result = cursor.fetchone()
+            if not result:
+                self.logger.debug(f"No GuildChannel found with id '{guild_channel_id}'")
+                continue
+            discord_guild_id = result[0]
+            if discord_guild_id != guild_id:
+                self.logger.debug(f"GuildChannel with id '{guild_channel_id}' does not belong to guild '{guild_id}'")
+                continue
+            cursor.execute('DELETE FROM FeedForwards WHERE subscription_id = ?', (id,))
+            cursor.execute('DELETE FROM FeedSubscription WHERE id = ?', (id,))
+            final_id = id
+            conn.commit()
+            self.logger.debug(f"FeedSubscription with id '{id}' removed from the database")
         conn.close()
-        self.logger.debug(f"FeedSubscription with id '{id}' removed from the database")
-        return id
+        return final_id
 
     @rss.command(integration_types={IntegrationType.guild_install}, name="remove_feed", description="Remove an RSS feed from monitoring")
     @default_permissions(administrator=True)
     async def remove_feed(self, ctx: discord.ApplicationContext, 
-                       name: Option(str, "Name of the feed to remove")):
+                       name: str = Option(str, description="Name of the feed to remove", required=True)):
         if not await self.is_user_allowed(ctx.author):
             await ctx.respond(content="You are not allowed to use this command.", ephemeral=True)
             return
         await ctx.defer()
 
         # Remove the FeedSubscription entry from the database
-        feed_subscription_table_id = self.remove_feed_subscription_from_database(name)
+        feed_subscription_table_id = self.remove_feed_subscription_from_database(name, ctx.guild.id)
         if not feed_subscription_table_id:
             await ctx.respond(f"No FeedSubscription found with name '{name}' for guild {ctx.guild.id}")
             return
@@ -219,7 +219,7 @@ class RSSFeed(commands.Cog):
     @rss.command(integration_types={IntegrationType.guild_install}, name="set_feed_channel", description="Set the channel for RSS feed updates")
     @default_permissions(administrator=True)
     async def set_feed_channel(self, ctx: discord.ApplicationContext, 
-                       channel: Option(discord.TextChannel, "The channel to send RSS updates to")):
+                       channel: discord.TextChannel = Option(discord.TextChannel, description="The channel to send RSS updates to", required=True)):
         if not await self.is_user_allowed(ctx.author):
             await ctx.respond(content="You are not allowed to use this command.", ephemeral=True)
             return
@@ -309,23 +309,32 @@ class RSSFeed(commands.Cog):
 
     @tasks.loop(minutes=5)
     async def check_feeds(self):
-        self.logger.debug("Checking feeds for updates")
+        self.logger.debug("Starting feed check loop")
         conn = self.get_connection()
         
         # 1. Get all items from RssFeed table
         cursor = conn.cursor()
         cursor.execute('SELECT id, rss_feed_url FROM RssFeed')
         rss_feeds = cursor.fetchall()
+        self.logger.debug(f"Fetched {len(rss_feeds)} RSS feeds from the database.")
         
         for feed_id, rss_feed_url in rss_feeds:
+            self.logger.debug(f"Processing feed_id: {feed_id}, URL: {rss_feed_url}")
             # 2. Fetch messages for the feed
-            feedparser_data = feedparser.parse(rss_feed_url)
+            try:
+                feedparser_data = feedparser.parse(rss_feed_url)
+                self.logger.debug(f"Fetched {len(feedparser_data.entries)} entries from feed {rss_feed_url}")
+            except Exception as e:
+                self.logger.error(f"Error parsing feed {rss_feed_url}: {e}")
+                continue
             
             for entry in feedparser_data.entries:
+                self.logger.debug(f"Processing entry: {entry.title}")
                 # 3. Save the entry to RssMessage
-                message_id = self.get_hash(str(entry.guid))
+                message_id = self.get_hash(str(entry.get('guid', entry.link)))
                 cursor.execute('SELECT * FROM RssMessage WHERE id = ?', (message_id,))
                 if cursor.fetchone() is None:
+                    self.logger.debug(f"New entry found: {entry.title} (ID: {message_id})")
                     # Save the new message
                     self.add_entry_to_database('RssMessage', message_id, 
                                                 feed_id=feed_id,
@@ -334,43 +343,69 @@ class RSSFeed(commands.Cog):
                                                 description=entry.description,
                                                 enclosure_href=getattr(entry, 'enclosure', {}).get('href', None),
                                                 category=getattr(entry, 'category', None),
-                                                pub_date=entry.published)
+                                                pub_date=entry.get('published', ''))
                     conn.commit()
-
+                    self.logger.debug(f"Entry '{entry.title}' added to RssMessage table.")
+    
                     cursor.execute('SELECT * FROM FeedSubscription WHERE feed_id = ?', (feed_id,))
                     subscriptions = cursor.fetchall()
-
+                    self.logger.debug(f"Found {len(subscriptions)} subscriptions for feed_id {feed_id}.")
+    
                     for sub_id, _, guild_channel_id, name in subscriptions:
+                        self.logger.debug(f"Processing subscription {sub_id} for guild_channel_id {guild_channel_id}")
                         cursor.execute('SELECT * FROM FeedForwards WHERE subscription_id = ? AND message_id = ?', (sub_id, message_id)) # check if the message has already been forwarded
                         if cursor.fetchone() is None: # if not, send the embed
+                            self.logger.debug(f"Forwarding new entry '{entry.title}' to subscription {sub_id}")
                             # 5. Send embed to the channel and add to FeedForwards table
                             # get the guild and channel id from the guild_channel_id
                             cursor.execute('SELECT discord_guild_id, discord_channel_id FROM GuildChannel WHERE id = ?', (guild_channel_id,))
-                            guild_id, channel_id = cursor.fetchone()
+                            result = cursor.fetchone()
+                            if not result:
+                                self.logger.error(f"No GuildChannel found with id '{guild_channel_id}'")
+                                continue
+                            guild_id, channel_id = result
+                            self.logger.debug(f"Fetched guild_id: {guild_id}, channel_id: {channel_id}")
+                            
                             guild = self.bot.get_guild(int(guild_id))
+                            if not guild:
+                                self.logger.error(f"Guild with ID {guild_id} not found.")
+                                continue
+                            
                             channel = guild.get_channel(int(channel_id))
-                            channel = self.bot.get_channel(int(channel_id))
+                            if not channel:
+                                self.logger.error(f"Channel with ID {channel_id} not found in guild {guild_id}.")
+                                continue
+                            
                             title = entry.title
                             if self.is_spiegel_plus(entry.link):
                                 title = f"(S+) {title}"
+                            
                             # send the embed of the message to the channel
                             embed = discord.Embed(title=title, url=entry.link, description=entry.description)
-                            if entry.enclosures:
-                                embed.set_image(url=entry.enclosures[0].href)
-                            if entry.category:
+                            if hasattr(entry, 'enclosures') and entry.enclosures:
+                                embed.set_image(url=entry.enclosures[0].get('href', ''))
+                            if hasattr(entry, 'category'):
                                 embed.add_field(name="Category", value=entry.category, inline=True)
-                            if entry.published:
+                            if hasattr(entry, 'published'):
                                 embed.add_field(name="Published Date", value=entry.published, inline=True)
                             if self.is_spiegel_plus(entry.link):
                                 embed.add_field(name="RemovePaywall", value=f"[Try it out!](https://www.removepaywall.com/search?url={entry.link})", inline=False)
                             embed.set_footer(text=f"Feed: {name}")
-                            await channel.send(embed=embed)
-
+                            
+                            try:
+                                await channel.send(embed=embed)
+                                self.logger.debug(f"Sent embed for '{entry.title}' to channel {channel_id}")
+                            except Exception as e:
+                                self.logger.error(f"Failed to send embed to channel {channel_id}: {e}")
+                                continue
+    
                             # save the new forward
-                            cursor.execute('INSERT INTO FeedForwards (subscription_id, message_id) VALUES (?, ?)', (sub_id, self.get_hash(str(entry.guid))))
+                            cursor.execute('INSERT INTO FeedForwards (subscription_id, message_id) VALUES (?, ?)', (sub_id, message_id))
                             conn.commit()
+                            self.logger.debug(f"Recorded feed forward for message_id {message_id} and subscription_id {sub_id}")
         conn.commit()
         conn.close()
+        self.logger.debug("Feed check loop completed.")
         
 
     @check_feeds.before_loop
