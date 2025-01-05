@@ -1,5 +1,5 @@
 python-dotenv
-git+https://github.com/Pycord-Development/pycord.git@refs/pull/2579/head # py-cord use pull request 2579 to use voice messages
+git+https://github.com/Pycord-Development/pycord.git@master # py-cord from master to use voice messages
 yt_dlp
 validators
 httpx
