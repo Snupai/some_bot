@@ -113,24 +113,69 @@ async def change_activity():
 
 change_activity.start()
 
-@bot.slash_command(integration_types={discord.IntegrationType.user_install}, name="reload_cogs", description="Reload all cogs.")
+@bot.slash_command(integration_types={discord.IntegrationType.user_install}, name="reload_cogs", description="Reload specified cogs or all cogs.")
 @commands.is_owner()
-async def reload_cogs(ctx: discord.ApplicationContext):
+async def reload_cogs(ctx: discord.ApplicationContext, cog_names: str = None):
     """
-    Reload all cogs.
+    Reload specified cogs or all cogs.
+    Parameters:
+        cog_names (str): Optional. Comma-separated list of cog names to reload. If not provided, all cogs will be reloaded.
     """
-    for filename in os.listdir('./cogs'):
-        if filename.endswith('.py'):
-            try:
-                bot.reload_extension(f'cogs.{filename[:-3]}')
-                logger.info(f"Reloaded extension: {filename}")
-            except Exception as e:
-                logger.error(f"Failed to reload extension: {filename}")
-                logger.error(f"Error: {str(e)}")
-                await ctx.respond(f"Error reloading extension: {filename}\nError: {str(e)}", ephemeral=True)
-                return
+    if cog_names:
+        # Split the cog names and remove any whitespace
+        cogs_to_reload = [name.strip() for name in cog_names.split(',')]
+    else:
+        # If no cogs specified, get all cogs
+        cogs_to_reload = [filename[:-3] for filename in os.listdir('./cogs') if filename.endswith('.py')]
+
+    success_cogs = []
+    failed_cogs = []
+
+    for cog_name in cogs_to_reload:
+        try:
+            extension_name = f'cogs.{cog_name}'
+            # Check if the extension exists
+            if not os.path.exists(f'./cogs/{cog_name}.py'):
+                failed_cogs.append((cog_name, "Cog file not found"))
+                continue
+                
+            # Attempt to reload the extension
+            bot.reload_extension(extension_name)
+            logger.info(f"Reloaded extension: {cog_name}")
+            success_cogs.append(cog_name)
+        except Exception as e:
+            logger.error(f"Failed to reload extension: {cog_name}")
+            logger.error(f"Error: {str(e)}")
+            failed_cogs.append((cog_name, str(e)))
+
+    # Create embed
+    embed = discord.Embed(
+        title="Cog Reload Status",
+        color=discord.Color.blue(),
+        timestamp=datetime.datetime.now()
+    )
+
+    # Add successful reloads if any
+    if success_cogs:
+        embed.add_field(
+            name="✅ Successfully Reloaded",
+            value=", ".join(success_cogs),
+            inline=False
+        )
+
+    # Add failed reloads if any
+    if failed_cogs:
+        failed_text = "\n".join([f"• **{cog}**: {error}" for cog, error in failed_cogs])
+        embed.add_field(
+            name="❌ Failed to Reload",
+            value=failed_text or "None",
+            inline=False
+        )
+
+    # Add footer
+    embed.set_footer(text=f"Requested by {ctx.author}", icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
     await bot.sync_commands()
-    await ctx.respond("All cogs reloaded successfully.", ephemeral=True)
+    await ctx.respond(embed=embed, ephemeral=True)
 
 
 # Run the bot
