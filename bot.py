@@ -5,6 +5,9 @@ from dotenv import load_dotenv
 import os
 import datetime
 import time
+import signal
+import sys
+import asyncio
 
 COOKIES_FILE = 'cookies.txt'
 
@@ -14,24 +17,91 @@ USER_INSTALL_LINK = "https://discord.com/oauth2/authorize?client_id=121927001116
 # Load the environment variables from .env file
 load_dotenv()
 
-# Create a new bot instance
-intents = discord.Intents.default()
-intents.members = True
-intents.message_content = True
-intents.voice_states = True
+class Bot(commands.AutoShardedBot):
+    def __init__(self):
+        intents = discord.Intents.default()
+        intents.members = True
+        intents.message_content = True
+        intents.voice_states = True
+        
+        super().__init__(intents=intents, sync_commands=True)
+        self.start_time = time.time()
+        self.logger = setup_logger()
+        
+        # Load all cogs
+        self.load_extensions()
+        
+        # Register signal handlers
+        self.setup_signal_handlers()
+        
+    def load_extensions(self):
+        """Load all cogs from the cogs directory"""
+        for filename in os.listdir('./cogs'):
+            if filename.endswith('.py'):
+                try:
+                    self.load_extension(f'cogs.{filename[:-3]}')
+                    self.logger.info(f"Loaded extension: {filename}")
+                except Exception as e:
+                    self.logger.error(f"Failed to load extension: {filename}")
+                    self.logger.error(f"Error: {str(e)}")
+                    print(f"Error loading extension: {filename}")
+                    print(f"Error: {str(e)}")
 
-bot = commands.AutoShardedBot(intents=intents, sync_commands=True)
-
-timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-
-# Set the start time when the bot starts
-bot.start_time = time.time()
+    def setup_signal_handlers(self):
+        """Setup handlers for various termination signals"""
+        signals = (signal.SIGTERM, signal.SIGINT, signal.SIGBREAK if sys.platform == "win32" else signal.SIGQUIT)
+        for sig in signals:
+            signal.signal(sig, self.handle_signal)
+            
+    def handle_signal(self, signum, frame):
+        """Handle termination signals"""
+        self.logger.info(f"Received signal {signum}. Starting clean shutdown...")
+        
+        # Create an asyncio task for cleanup
+        if sys.platform == "win32":
+            loop = asyncio.get_event_loop()
+        else:
+            loop = asyncio.get_running_loop()
+            
+        loop.create_task(self.cleanup())
+        
+    async def cleanup(self):
+        """Perform cleanup operations before shutdown"""
+        self.logger.info("Starting cleanup...")
+        
+        # Cancel all running tasks
+        tasks = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+            
+        try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            self.logger.error(f"Error during task cleanup: {e}")
+            
+        # Unload all cogs
+        for extension in list(self.extensions):
+            try:
+                await self.unload_extension(extension)
+                self.logger.info(f"Unloaded extension: {extension}")
+            except Exception as e:
+                self.logger.error(f"Error unloading extension {extension}: {e}")
+                
+        # Close the bot connection
+        try:
+            await self.close()
+        except Exception as e:
+            self.logger.error(f"Error closing bot connection: {e}")
+            
+        self.logger.info("Cleanup completed. Shutting down...")
+        sys.exit(0)
 
 # Create a logger with timestamp in the file name
 def setup_logger():
     """
     Setup the logger.
     """
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_file = f"bot_{timestamp}.log"
     logger = logging.getLogger('bot.py')
     logger.setLevel(logging.DEBUG)
@@ -55,128 +125,18 @@ def setup_logger():
 
     return logger
 
-logger = setup_logger()
-
-# load all cogs within the cogs directory
-for filename in os.listdir('./cogs'):
-    if filename.endswith('.py'):
-        try:
-            bot.load_extension(f'cogs.{filename[:-3]}')
-            logger.info(f"Loaded extension: {filename}")
-        except Exception as e:
-            logger.error(f"Failed to load extension: {filename}")
-            logger.error(f"Error: {str(e)}")
-            print(f"Error loading extension: {filename}")
-            print(f"Error: {str(e)}")
-
-DEFAULT_ACTIVITY: str = "Meaw~"
-activity: str = DEFAULT_ACTIVITY
-
-@bot.event
-async def on_command_error(ctx, error):
-    """
-    Event triggered when a command fails.
-    """
-    logger.error(f"Command {ctx.command} failed with error: {str(error)}")
-
-@bot.event
-async def on_ready():
-    """
-    Event triggered when the bot is ready.
-    """
-    logger.info(f'Logged in as {bot.user.name}')
-    logger.info(f'ID: {bot.user.id}')
-    logger.info(f"Guild install link: {GUILD_INSTALL_LINK}")
-    logger.info(f"User install link: {USER_INSTALL_LINK}") 
-
-    activity = DEFAULT_ACTIVITY
-
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.playing, name=activity))
-
-    # delete all commands and recreate them
-    await bot.sync_commands()
-
-@tasks.loop(minutes=1)
-async def change_activity():
-    """
-    Change the bot's activity every 60 seconds.
-    """
-    # Set the activity
-    global activity # make 'activity' a global variable so it can be accessed by the function
-
+def run_bot():
+    """Initialize and run the bot"""
+    load_dotenv()
+    bot = Bot()
     
-    # Cycle through a list of activities
-    activities = ["Having fun", "Nya", "Meaw~"]
-    activity = activities[(activities.index(activity) + 1) % len(activities)]
+    try:
+        bot.run(os.getenv('BOT_TOKEN'))
+        bot.logger.info("Bot started")
+        bot.logger.info(f"Bot is running as {bot.user.name} in {len(bot.guilds)} guilds")
+    except Exception as e:
+        bot.logger.error(f"Error running bot: {e}")
+        sys.exit(1)
 
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.playing, name=activity))
-
-change_activity.start()
-
-@bot.slash_command(integration_types={discord.IntegrationType.user_install}, name="reload_cogs", description="Reload specified cogs or all cogs.")
-@commands.is_owner()
-async def reload_cogs(ctx: discord.ApplicationContext, cog_names: str = None):
-    """
-    Reload specified cogs or all cogs.
-    Parameters:
-        cog_names (str): Optional. Comma-separated list of cog names to reload. If not provided, all cogs will be reloaded.
-    """
-    if cog_names:
-        # Split the cog names and remove any whitespace
-        cogs_to_reload = [name.strip() for name in cog_names.split(',')]
-    else:
-        # If no cogs specified, get all cogs
-        cogs_to_reload = [filename[:-3] for filename in os.listdir('./cogs') if filename.endswith('.py')]
-
-    success_cogs = []
-    failed_cogs = []
-
-    for cog_name in cogs_to_reload:
-        try:
-            extension_name = f'cogs.{cog_name}'
-            # Check if the extension exists
-            if not os.path.exists(f'./cogs/{cog_name}.py'):
-                failed_cogs.append((cog_name, "Cog file not found"))
-                continue
-                
-            # Attempt to reload the extension
-            bot.reload_extension(extension_name)
-            logger.info(f"Reloaded extension: {cog_name}")
-            success_cogs.append(cog_name)
-        except Exception as e:
-            logger.error(f"Failed to reload extension: {cog_name}")
-            logger.error(f"Error: {str(e)}")
-            failed_cogs.append((cog_name, str(e)))
-
-    # Create embed
-    embed = discord.Embed(
-        title="Cog Reload Status",
-        color=discord.Color.blue(),
-        timestamp=datetime.datetime.now()
-    )
-
-    # Add successful reloads if any
-    if success_cogs:
-        embed.add_field(
-            name="✅ Successfully Reloaded",
-            value=", ".join(success_cogs),
-            inline=False
-        )
-
-    # Add failed reloads if any
-    if failed_cogs:
-        failed_text = "\n".join([f"• **{cog}**: {error}" for cog, error in failed_cogs])
-        embed.add_field(
-            name="❌ Failed to Reload",
-            value=failed_text or "None",
-            inline=False
-        )
-
-    # Add footer
-    embed.set_footer(text=f"Requested by {ctx.author}", icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
-    await bot.sync_commands()
-    await ctx.respond(embed=embed, ephemeral=True)
-
-
-# Run the bot
-bot.run(os.getenv('BOT_TOKEN'))
+if __name__ == "__main__":
+    run_bot()

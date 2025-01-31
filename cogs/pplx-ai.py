@@ -24,7 +24,7 @@ class PPLXAICog(commands.Cog):
         
     pplxai = discord.SlashCommandGroup(integration_types={discord.IntegrationType.user_install}, name="pplx-ai", description="Perplexity AI API")
 
-    def split_text(self, text: str, max_length: int = 2000) -> list[str]:
+    def split_text(self, text: str, max_length: int = 1900) -> list[str]:
         """
         Splits text into segments of a maximum length while preserving code blocks.
 
@@ -112,7 +112,7 @@ class PPLXAICog(commands.Cog):
         if not await self.is_user_allowed(ctx.author):
             await ctx.respond(content="You are not allowed to use this command.", ephemeral=True)
             return
-        self.logger.info(f"{ctx.author} used /pplx-ai command in {ctx.channel} on {ctx.guild}.")
+        self.logger.info(f"{ctx.author} used /pplx-ai command in {ctx.channel} on {ctx.guild.name}.")
 
         await ctx.defer()
 
@@ -142,12 +142,23 @@ class PPLXAICog(commands.Cog):
         content = response.choices[0].message.content
         content = content.replace("####", "###") # for discord compatibility
 
-        # Replace occurrences of [n] with [n](citations[n])
+        
+        # Replace occurrences of [n] with [[n]](citations[n])
         for index, citation in enumerate(citations):
-            content = content.replace(f"[{index}]", f"[{index}](<{citation}>)")
+            content = content.replace(f"[{index}]", f"[[{index}]](<{citation}>)")
 
-        if len(content) > 2000:  
-                chunks = self.split_text(content)
+
+        # write the content to a temp file
+        with open("temp.txt", "w") as file:
+            file.write(content)
+
+        if len(content) > 1900:  
+            chunks = self.split_text(content)
+            # if there are more than 6 chunks write send the temp file as an attachment instead of sending the chunks
+            if len(chunks) > 6:
+                file = discord.File(fp="temp.txt", filename="response.txt", description=f"Response from PPLX AI for:\n{prompt}")
+                await ctx.respond(file=file)
+            else:
                 await ctx.respond(content=chunks[0])
                 for chunk in chunks[1:]:
                     await ctx.followup.send(content=chunk)
