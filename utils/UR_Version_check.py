@@ -40,36 +40,44 @@ class URVersionChecker:
         try:
             # Set up Chrome options for headless operation
             chrome_options = Options()
-            chrome_options.add_argument('--headless=new')  # Create a new browser context
+            chrome_options.add_argument('--headless')
             chrome_options.add_argument('--no-sandbox')
             chrome_options.add_argument('--disable-gpu')
             chrome_options.add_argument('--disable-dev-shm-usage')
-            chrome_options.add_argument('--remote-debugging-port=9222')
-            chrome_options.add_argument('--disable-extensions')
-            chrome_options.add_argument('--disable-setuid-sandbox')
+            chrome_options.add_argument('--remote-debugging-port=9222')  # Add specific debugging port
             chrome_options.add_argument('--disable-software-rasterizer')
+            chrome_options.binary_location = '/snap/bin/chromium'
             chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
+            chrome_options.add_experimental_option('w3c', True)  # Enable W3C mode
 
             # Initialize ChromeDriver with the correct ChromeType for Chromium
-            service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
+            service = Service(
+                ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()
+            )
             
             # Create a new Chrome driver instance
-            driver = webdriver.Chrome(service=service, options=chrome_options)
+            driver = webdriver.Chrome(
+                service=service, 
+                options=chrome_options
+            )
             
             try:
-                # Set window size explicitly
-                driver.set_window_size(1920, 1080)
+                # Set page load timeout
+                driver.set_page_load_timeout(30)
+                driver.set_script_timeout(30)
                 
+                # Navigate to the URL with explicit wait
                 driver.get(self.url)
+                await asyncio.sleep(2)  # Give more time for initial page load
                 
                 # Wait for and click the cookie consent button
-                cookie_button = WebDriverWait(driver, 10).until(
+                cookie_button = WebDriverWait(driver, 30).until(
                     EC.element_to_be_clickable((By.ID, "CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll"))
                 )
                 cookie_button.click()
                 
                 # Wait for the button to be clickable and click it
-                button = WebDriverWait(driver, 10).until(
+                button = WebDriverWait(driver, 30).until(
                     EC.element_to_be_clickable((By.CLASS_NAME, "button"))
                 )
                 button.click()

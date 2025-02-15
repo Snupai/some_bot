@@ -7,8 +7,8 @@ import logging
 from utils.UR_Version_check import URVersionChecker
 
 class URVersionLoop(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
+    def __init__(self, bot: commands.Bot):
+        self.bot: commands.Bot = bot
         self.logger = logging.getLogger('bot.py')
         self.version_checker = URVersionChecker()
         self.check_version.start()
