@@ -7,6 +7,7 @@
 cookies.txt
 output.txt
 *.sqlite
+*.json
 
 ### Python ###
 # Byte-compiled / optimized / DLL files
