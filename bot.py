@@ -18,7 +18,7 @@ USER_INSTALL_LINK = "https://discord.com/oauth2/authorize?client_id=121927001116
 load_dotenv()
 
 class Bot(commands.AutoShardedBot):
-    def __init__(self):
+    def __init__(self) -> None:
         intents = discord.Intents.default()
         intents.members = True
         intents.message_content = True
@@ -34,7 +34,7 @@ class Bot(commands.AutoShardedBot):
         # Register signal handlers
         self.setup_signal_handlers()
         
-    def load_extensions(self):
+    def load_extensions(self) -> None:
         """Load all cogs from the cogs directory"""
         for filename in os.listdir('./cogs'):
             if filename.endswith('.py'):
@@ -47,13 +47,13 @@ class Bot(commands.AutoShardedBot):
                     print(f"Error loading extension: {filename}")
                     print(f"Error: {str(e)}")
 
-    def setup_signal_handlers(self):
+    def setup_signal_handlers(self) -> None:
         """Setup handlers for various termination signals"""
         signals = (signal.SIGTERM, signal.SIGINT, signal.SIGBREAK if sys.platform == "win32" else signal.SIGQUIT)
         for sig in signals:
             signal.signal(sig, self.handle_signal)
             
-    def handle_signal(self, signum, frame):
+    def handle_signal(self, signum, frame) -> None:
         """Handle termination signals"""
         self.logger.info(f"Received signal {signum}. Starting clean shutdown...")
         
