@@ -22,7 +22,11 @@ class URVersionLoop(commands.Cog):
         # if result is not None and not an exception, send a message to the channel
         if result is not None and not isinstance(result, Exception):
             # send a dm to bot owner
-            await self.bot.get_user(self.bot.owner_id).send(f"New version found: {result}")
+            owner = self.bot.get_user(239809113125552129)
+            if owner is not None:
+                await owner.send(f"New version found: [{result['version']}]({result['link']})")
+            else:
+                self.logger.error("Could not find bot owner to send DM")
 
     ur_group = SlashCommandGroup(integration_types={IntegrationType.user_install}, name="ur", description="Universal Robots commands")
     
@@ -34,14 +38,15 @@ class URVersionLoop(commands.Cog):
         if isinstance(result, Exception):
             await ctx.respond(f"Error checking version: {result}")
         elif result is not None:
-            await ctx.respond(f"New version found: {result}")
+            await ctx.respond(f"New version found: [{result['version']}]({result['link']})")
         else:
-            # read the version file and get the version and last_check
+            # read the version file and get the version, link and last_check
             with open(self.version_file, 'r') as f:
                 data = json.load(f)
                 version = data['version']
+                link = data.get('link', 'No link available')  # Handle cases where link might not exist in older saved data
                 last_check = data['last_check']
-            await ctx.respond(f"No new version found. Current version: {version} (last updated: {last_check})")
+            await ctx.respond(f"No new version found. Current version: [{version}]({link}) (last updated: {last_check})")
 
 def setup(bot):
     bot.add_cog(URVersionLoop(bot))
