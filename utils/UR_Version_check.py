@@ -52,19 +52,23 @@ class URVersionChecker:
         try:
             # Set up Chrome options for headless operation
             chrome_options = Options()
-            chrome_options.add_argument('--headless')
+            chrome_options.add_argument('--headless=new')  # Using new headless mode
             chrome_options.add_argument('--no-sandbox')
             chrome_options.add_argument('--disable-gpu')
             chrome_options.add_argument('--disable-dev-shm-usage')
-            chrome_options.add_argument('--remote-debugging-port=9222')  # Add specific debugging port
-            chrome_options.add_argument('--disable-software-rasterizer')
+            chrome_options.add_argument('--disable-extensions')
             chrome_options.binary_location = '/snap/bin/chromium'
+            chrome_options.add_argument('--remote-debugging-pipe')  # Use pipe instead of port
+            chrome_options.add_argument('--single-process')  # Run in single process mode
+            chrome_options.add_argument('--disable-features=site-per-process')  # Disable site isolation
+            chrome_options.add_argument('--disable-setuid-sandbox')
+            chrome_options.add_argument('--disable-dev-tools')
             chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
-            chrome_options.add_experimental_option('w3c', True)  # Enable W3C mode
 
-            # Initialize ChromeDriver with the correct ChromeType for Chromium
+            # Initialize ChromeDriver with the correct ChromeType and increased timeout
             service = Service(
-                ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()
+                ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install(),
+                service_args=['--verbose']
             )
             
             # Create a new Chrome driver instance
@@ -100,41 +104,26 @@ class URVersionChecker:
                 
                 # Get the second cell (td) in that row
                 target_cell = second_row.find_elements(By.TAG_NAME, "td")[1]
-                #self.logger.debug(f"Target cell text: {target_cell.text}")
+                cell_html = target_cell.get_attribute('innerHTML')
+                self.logger.debug(f"Cell HTML: {cell_html}")
                 
                 version_links = []
                 
                 # Find all links in this cell
                 links = target_cell.find_elements(By.TAG_NAME, "a")
                 for link_element in links:
-                    # Check both the link text and any spans inside it
-                    link_text = link_element.text.strip()
-                    #self.logger.debug(f"Found link text: {link_text}")
+                    # Get the full HTML content of the link
+                    link_html = link_element.get_attribute('innerHTML')
+                    self.logger.debug(f"Link HTML: {link_html}")
                     
-                    # Try to find version number in link text
-                    match = re.search(self.version_pattern, link_text)
-                    if match:
-                        version = match.group(1)
+                    # Find all version numbers in the link HTML
+                    versions = re.findall(self.version_pattern, link_html)
+                    for version in versions:
                         if version.startswith(('5.', '6.', '7.', '8.', '9.')):
                             link = link_element.get_attribute("href")
                             if link:
                                 version_links.append({"version": version, "link": link})
-                                #self.logger.debug(f"Added version: {version} with link: {link}")
-                    
-                    # Also check any spans inside this link
-                    spans = link_element.find_elements(By.TAG_NAME, "span")
-                    for span in spans:
-                        span_text = span.text.strip()
-                        #self.logger.debug(f"Found span text in link: {span_text}")
-                        
-                        match = re.search(self.version_pattern, span_text)
-                        if match:
-                            version = match.group(1)
-                            if version.startswith(('5.', '6.', '7.', '8.', '9.')):
-                                link = link_element.get_attribute("href")
-                                if link:
-                                    version_links.append({"version": version, "link": link})
-                                    #self.logger.debug(f"Added version from span: {version} with link: {link}")
+                                self.logger.debug(f"Added version from HTML: {version} with link: {link}")
                 
                 # Remove duplicates while preserving order
                 unique_versions = []

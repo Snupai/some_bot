@@ -5,6 +5,7 @@ import datetime
 import json
 import logging
 from utils.UR_Version_check import URVersionChecker
+import requests
 
 class URVersionLoop(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -19,14 +20,31 @@ class URVersionLoop(commands.Cog):
     @tasks.loop(time=datetime.time(hour=7))
     async def check_version(self):
         result = await self.version_checker.check_version()
-        # if result is not None and not an exception, send a message to the channel
+        # if result is not None and not an exception, send messages
         if result is not None and not isinstance(result, Exception):
-            # send a dm to bot owner
+            message = f"New UR version found: {result['version']}"
+            
+            # Send DM to bot owner
             owner = self.bot.get_user(239809113125552129)
             if owner is not None:
                 await owner.send(f"New version found: [{result['version']}]({result['link']})")
             else:
                 self.logger.error("Could not find bot owner to send DM")
+
+            # Send ntfy notification
+            try:
+                requests.post("http://snupai.info/",
+                    data=json.dumps({
+                        "topic": "UR_Version-Check",
+                        "message": message,
+                        "title": f"New UR Version {result['version']}",
+                        "tags": ["robot", "new"],
+                        "priority": "default",
+                        "click": result['link']
+                    })
+                )
+            except Exception as e:
+                self.logger.error(f"Failed to send ntfy notification: {e}")
 
     ur_group = SlashCommandGroup(integration_types={IntegrationType.user_install}, name="ur", description="Universal Robots commands")
     
