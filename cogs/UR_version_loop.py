@@ -17,7 +17,7 @@ class URVersionLoop(commands.Cog):
     def cog_unload(self):
         self.check_version.cancel()
 
-    @tasks.loop(time=datetime.time(hour=7))
+    @tasks.loop(time=datetime.time(hour=8))
     async def check_version(self):
         result = await self.version_checker.check_version()
         # if result is not None and not an exception, send messages
@@ -52,19 +52,22 @@ class URVersionLoop(commands.Cog):
     @commands.is_owner()
     async def check_version_command(self, ctx: discord.ApplicationContext):
         await ctx.defer()
-        result = await self.version_checker.check_version()
-        if isinstance(result, Exception):
+        
+        # Run version check with force=True to always return the latest version
+        result = await self.version_checker.check_version(force=True)
+        
+        if result is None:
+            await ctx.respond("No new version found.")
+        elif isinstance(result, Exception):
             await ctx.respond(f"Error checking version: {result}")
-        elif result is not None:
-            await ctx.respond(f"New version found: [{result['version']}]({result['link']})")
         else:
-            # read the version file and get the version, link and last_check
-            with open(self.version_file, 'r') as f:
-                data = json.load(f)
-                version = data['version']
-                link = data.get('link', 'No link available')  # Handle cases where link might not exist in older saved data
-                last_check = data['last_check']
-            await ctx.respond(f"No new version found. Current version: [{version}]({link}) (last updated: {last_check})")
+            embed = discord.Embed(
+                title=f"Universal Robots Version: {result['version']}",
+                description=f"Latest version found: [{result['version']}]({result['link']})",
+                color=Colour.blue()
+            )
+            embed.add_field(name="Download Link", value=result['link'])
+            await ctx.respond(embed=embed)
 
 def setup(bot):
     bot.add_cog(URVersionLoop(bot))
