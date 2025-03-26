@@ -83,44 +83,98 @@ class YoutubeDLPCog(commands.Cog):
         return True
 
     async def handle_spotify_url(self, url):
-        if "spotify.com" in url:
-            sp = spotipy.Spotify(auth_manager=spotipy.oauth2.SpotifyClientCredentials(
-                client_id=os.getenv('SPOTIFY_CLIENT_ID'),
-                client_secret=os.getenv('SPOTIFY_CLIENT_SECRET')
-            ))
-            track_id = url.split('/')[-1].split('?')[0]
-            track_info = sp.track(track_id)
-            artist = track_info['artists'][0]['name']
-            title = track_info['name']
-            search_query = f"{artist} - {title}"
-            ydl_opts = {
-                'default_search': 'ytsearch',
-                'quiet': True,
-                'cookiefile': COOKIES_FILE,
-            }
-            with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(search_query, download=False)
-                url = info['entries'][0]['webpage_url']
-        return url
+        self.logger.info(f"Handling Spotify URL: {url}")
+        try:
+            if "spotify.com" in url:
+                if not os.getenv('SPOTIFY_CLIENT_ID') or not os.getenv('SPOTIFY_CLIENT_SECRET'):
+                    self.logger.error("Spotify credentials not found in environment variables")
+                    raise Exception("Spotify credentials not configured")
+                    
+                sp = spotipy.Spotify(auth_manager=spotipy.oauth2.SpotifyClientCredentials(
+                    client_id=os.getenv('SPOTIFY_CLIENT_ID'),
+                    client_secret=os.getenv('SPOTIFY_CLIENT_SECRET')
+                ))
+                
+                # Extract track ID from URL
+                track_id = url.split('/')[-1].split('?')[0]
+                self.logger.info(f"Extracted Spotify track ID: {track_id}")
+                
+                # Get track info
+                track_info = sp.track(track_id)
+                artist = track_info['artists'][0]['name']
+                title = track_info['name']
+                search_query = f"{artist} - {title}"
+                self.logger.info(f"Generated search query: {search_query}")
+                
+                ydl_opts = {
+                    'default_search': 'ytsearch',
+                    'quiet': False,
+                    'cookiefile': COOKIES_FILE,
+                    'format': 'bestaudio/best',
+                    'extract_audio': True,
+                    'audio_format': 'opus',
+                    'audio_quality': 192,
+                }
+                
+                with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(search_query, download=False)
+                    if not info or 'entries' not in info or not info['entries']:
+                        raise Exception("No YouTube results found for Spotify track")
+                    url = info['entries'][0]['webpage_url']
+                    self.logger.info(f"Found YouTube URL: {url}")
+                    
+            return url
+        except Exception as e:
+            self.logger.error(f"Error handling Spotify URL: {str(e)}")
+            raise
 
     async def extract_info(self, ctx, url):
+        self.logger.info(f"Attempting to extract info from URL: {url}")
+        
+        # Clean and validate URL
+        url = url.strip()
+        if not validators.url(url):
+            await ctx.respond(content="Invalid URL provided. Please check the URL and try again.", ephemeral=True)
+            return None
+
         ydl = youtube_dl.YoutubeDL({
             'cookiefile': COOKIES_FILE,
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': True,
+            'quiet': False,  # Enable logging
+            'no_warnings': False,  # Show warnings
+            'extract_flat': False,  # Get full info
             'nocheckcertificate': True,
             'ignoreerrors': False,
-            'logtostderr': False,
+            'logtostderr': True,  # Enable stderr logging
             'no_color': True,
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'socket_timeout': 30,
+            'retries': 3,
+            'fragment_retries': 3,
+            'file_access_retries': 3,
+            'extractor_retries': 3,
+            # Remove format restrictions for initial extraction
         })
+        
         try:
+            self.logger.info("Starting info extraction...")
             info = ydl.extract_info(url, download=False)
-        except youtube_dl.DownloadError:
-            await ctx.respond(content="Error extracting info from the URL. Please check if the video is available and try again.", ephemeral=True)
+            
+            if not info:
+                self.logger.error("No info extracted from URL")
+                await ctx.respond(content="Could not extract information from the URL. Please check if the video is available and try again.", ephemeral=True)
+                return None
+                
+            self.logger.info(f"Successfully extracted info for: {info.get('title', 'Unknown Title')}")
+            return info
+            
+        except youtube_dl.DownloadError as e:
+            self.logger.error(f"DownloadError during extraction: {str(e)}")
+            await ctx.respond(content=f"Error extracting info from the URL: {str(e)}. Please check if the video is available and try again.", ephemeral=True)
             return None
-        return info
+        except Exception as e:
+            self.logger.error(f"Unexpected error during extraction: {str(e)}")
+            await ctx.respond(content=f"Unexpected error while extracting info: {str(e)}", ephemeral=True)
+            return None
 
     async def prepare_download(self, ctx, info, begin, end):
         if end is None:
@@ -157,46 +211,90 @@ class YoutubeDLPCog(commands.Cog):
 
     async def download_audio(self, ctx, url, title):
         ydl_opts = {
-            'format': 'bestaudio/best',
+            'format': 'bestaudio[ext=m4a]/bestaudio/best',  # More flexible format selection
             'outtmpl': f'{title}.%(ext)s',
             'restrictfilenames': True,
             'noplaylist': True,
-            'quiet': True,
-            'no_warnings': True,
+            'quiet': False,  # Enable logging for debugging
+            'no_warnings': False,
             'nooverwrites': True,
             'cookiefile': COOKIES_FILE,
+            'socket_timeout': 30,
+            'retries': 3,
+            'fragment_retries': 3,
+            'file_access_retries': 3,
+            'extractor_retries': 3,
+            'ignoreerrors': True,
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'opus',
                 'preferredquality': '192',
             }],
+            'verbose': True,  # Add verbose output for debugging
         }
         loop = asyncio.get_event_loop()
         with youtube_dl.YoutubeDL(ydl_opts) as ydl:
             try:
+                self.logger.info(f"Starting download for URL: {url}")
                 await loop.run_in_executor(None, lambda: ydl.download([url]))
+                
+                # Check if the file was actually created
+                if not os.path.exists(f'{title}.opus'):
+                    self.logger.error(f"Download completed but file {title}.opus not found")
+                    await ctx.respond(content="Failed to download the audio file. Please try again.", ephemeral=True)
+                    return False
+                    
+                self.logger.info(f"Successfully downloaded and converted audio to {title}.opus")
+                return True
+                
             except youtube_dl.DownloadError as e:
-                await ctx.respond(content=f"Error downloading the audio file: {e}", ephemeral=True)
+                self.logger.error(f"DownloadError during download: {str(e)}")
+                await ctx.respond(content=f"Error downloading the audio file: {str(e)}", ephemeral=True)
                 return False
-        return True
+            except Exception as e:
+                self.logger.error(f"Unexpected error during download: {str(e)}")
+                await ctx.respond(content=f"Unexpected error while downloading: {str(e)}", ephemeral=True)
+                return False
 
     async def trim_audio(self, ctx, title, begin, end):
-        ffmpeg_cmd = ['ffmpeg', '-i', f'{title}.opus', '-ab', '189k', '-ss', str(begin), '-t', str(end - begin), '-acodec', 'libopus', f'{title}.ogg']
-        process = await asyncio.create_subprocess_exec(*ffmpeg_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        stdout, stderr = await process.communicate()
+        try:
+            if not os.path.exists(f'{title}.opus'):
+                await ctx.respond(content="The downloaded audio file is missing. Please try again.", ephemeral=True)
+                return False
 
-        if process.returncode != 0:
-            await ctx.respond(content=f"Error trimming the audio file: {stderr.decode()}", ephemeral=True)
+            ffmpeg_cmd = ['ffmpeg', '-i', f'{title}.opus', '-ab', '189k', '-ss', str(begin), '-t', str(end - begin), '-acodec', 'libopus', f'{title}.ogg']
+            process = await asyncio.create_subprocess_exec(*ffmpeg_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout, stderr = await process.communicate()
+
+            if process.returncode != 0:
+                error_msg = stderr.decode() if stderr else "Unknown error"
+                await ctx.respond(content=f"Error trimming the audio file: {error_msg}", ephemeral=True)
+                return False
+
+            if not os.path.exists(f'{title}.ogg'):
+                await ctx.respond(content="Failed to create the trimmed audio file. Please try again.", ephemeral=True)
+                return False
+
+            return True
+        except Exception as e:
+            await ctx.respond(content=f"Unexpected error while trimming audio: {str(e)}", ephemeral=True)
             return False
-        return True
 
     async def send_audio(self, ctx, title):
         try:
             filepath = f'{title}.ogg'
             self.logger.debug(f"Calculated title: {title}")
+            
             if not os.path.exists(filepath):
                 await ctx.respond(content="Error finding the audio file.", ephemeral=True)
                 return
+
+            # Check file size
+            file_size = os.path.getsize(filepath)
+            if file_size > 25 * 1024 * 1024:  # 25MB limit
+                await ctx.respond(content="The audio file is too large to send. Please try a shorter clip.", ephemeral=True)
+                return
+
             # Step 2: Send the message with the uploaded file
             audio = AudioSegment.from_ogg(filepath)
             duration_secs = round(len(audio) / 1000.0, 2)
@@ -210,13 +308,21 @@ class YoutubeDLPCog(commands.Cog):
             waveform_data = base64.b64encode(bytes(waveform)).decode('utf-8')
             
             await ctx.respond(file=discord.VoiceMessage(f'{title}.ogg', waveform=waveform_data, duration_secs=duration_secs, filename="voice-message.ogg", description="some song idk"))
-
-            #await ctx.respond(content="Here's your audio! Enjoy! 🎵", file=discord.File(f'{title}.ogg'))
+            # send another message stating the title of the song above
+            title_msg = title.split("_")[:-1]
+            title_msg = "_".join(title_msg)
+            await ctx.followup.send(content=f"**{title_msg}**")
+        except Exception as e:
+            await ctx.respond(content=f"Error sending the audio file: {str(e)}", ephemeral=True)
         finally:
+            # Clean up files
             for extension in ['.opus', '.ogg']:
-                audio_file = Path(f'{title}{extension}')
-                if audio_file.is_file():
-                    audio_file.unlink()
+                try:
+                    audio_file = Path(f'{title}{extension}')
+                    if audio_file.is_file():
+                        audio_file.unlink()
+                except Exception as e:
+                    self.logger.error(f"Error deleting file {title}{extension}: {str(e)}")
 
     @ytdlp_cog.command(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="get-yt-link", description="Get the Youtube link based of a link to some music e.g. Spotify link")
     async def get_yt_link(self, ctx: discord.ApplicationContext, 
