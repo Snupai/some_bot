@@ -22,8 +22,8 @@ class PPLXAICog(commands.Cog):
         self.bot = bot
         self.logger = logging.getLogger('bot.py')
         
-    pplxai = discord.SlashCommandGroup(integration_types={discord.IntegrationType.user_install}, name="pplx-ai", description="Perplexity AI API")
-
+    pplxai = discord.SlashCommandGroup(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="pplx-ai", description="Perplexity AI API")
+    
     def split_text(self, text: str, max_length: int = 1900) -> list[str]:
         """
         Splits text into segments of a maximum length while preserving code blocks.
@@ -102,68 +102,79 @@ class PPLXAICog(commands.Cog):
         return False
         
 
-    @pplxai.command(integration_types={discord.IntegrationType.user_install}, name="ask", description="Ask Perplexity AI something")
+    @pplxai.command(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="ask", description="Ask Perplexity AI something", dm_permission=True)
     async def ask_pplx_ai(self, ctx: discord.ApplicationContext,
-                    prompt: str = discord.Option(name="prompt", description="The prompt to send to PPLX AI", required=True),
-                    model: str = discord.Option(name="model", description="The model to use", required=False, choices=[x.value for x in PplxAiModels])):
+                                prompt: str = discord.Option(name="prompt", description="The prompt to send to PPLX AI", required=True),
+                                model: str = discord.Option(name="model", description="The model to use", required=False, choices=[x.value for x in PplxAiModels])):
         """
         Command to ask PPLX AI something
         """
-        if not await self.is_user_allowed(ctx.author):
-            await ctx.respond(content="You are not allowed to use this command.", ephemeral=True)
-            return
-        self.logger.info(f"{ctx.author} used /pplx-ai command in {ctx.channel} on {ctx.guild.name}.")
+        try:
+            if not await self.is_user_allowed(ctx.author):
+                await ctx.respond(content="You are not allowed to use this command.", ephemeral=True)
+                return
+            self.logger.info(f"{ctx.author} used /pplx-ai command in {'DM' if ctx.guild is None else ctx.channel} on {ctx.guild.name if ctx.guild else 'DM'}.")
 
-        await ctx.defer()
+            await ctx.defer()
 
-        if model is None:
-            model = PplxAiModels.LLAMA_3_1_SONAR_SMALL_128K_ONLINE.value
+            if model is None:
+                model = PplxAiModels.LLAMA_3_1_SONAR_SMALL_128K_ONLINE.value
 
-        pplxai = OpenAI(api_key=os.getenv('PPLX_TOKEN'), base_url="https://api.perplexity.ai")
-        response = pplxai.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an artificial intelligence assistant and you need to "
-                        "engage in a helpful, detailed, polite conversation with a user."
-                    ),
-                },
-                {   
-                    "role": "user",
-                    "content": (
-                        prompt
-                    ),
-                },
-            ]
-        )
-        citations = response.citations
-        content = response.choices[0].message.content
-        content = content.replace("####", "###") # for discord compatibility
+            if not os.getenv('PPLX_TOKEN'):
+                await ctx.respond("Error: PPLX_TOKEN environment variable is not set.", ephemeral=True)
+                return
 
-        
-        # Replace occurrences of [n] with [[n]](citations[n])
-        for index, citation in enumerate(citations):
-            content = content.replace(f"[{index}]", f"[[{index}]](<{citation}>)")
+            pplxai = OpenAI(api_key=os.getenv('PPLX_TOKEN'), base_url="https://api.perplexity.ai")
+            response = pplxai.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an artificial intelligence assistant and you need to "
+                            "engage in a helpful, detailed, polite conversation with a user."
+                        ),
+                    },
+                    {   
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ]
+            )
+            citations = response.citations
+            content = response.choices[0].message.content
+            content = content.replace("####", "###") # for discord compatibility
 
+            # Replace occurrences of [n] with [[n]](citations[n])
+            for index, citation in enumerate(citations):
+                content = content.replace(f"[{index}]", f"[[{index}]](<{citation}>)")
 
-        # write the content to a temp file
-        with open("temp.txt", "w") as file:
-            file.write(content)
+            with open("temp_pplx_ai.txt", "w", encoding='utf-8') as file:
+                file.write(content)
 
-        if len(content) > 1900:  
-            chunks = self.split_text(content)
-            # if there are more than 6 chunks write send the temp file as an attachment instead of sending the chunks
-            if len(chunks) > 6:
-                file = discord.File(fp="temp.txt", filename="response.txt", description=f"Response from PPLX AI for:\n{prompt}")
-                await ctx.respond(file=file)
+            if len(content) > 1900:  
+                chunks = self.split_text(content)
+                # if there are more than 6 chunks write send the temp file as an attachment instead of sending the chunks
+                if len(chunks) > 6:
+                    with open("temp_pplx_ai.txt", "w", encoding='utf-8') as file:
+                        file.write(content)
+                    file = discord.File(fp="temp_pplx_ai.txt", filename="response.txt", description=f"Response from PPLX AI for:\n{prompt}")
+                    await ctx.respond(content=f"Response from PPLX AI for:\n{prompt}", file=file)
+                    os.remove("temp_pplx_ai.txt")
+                else:
+                    await ctx.respond(content=chunks[0])
+                    for chunk in chunks[1:]:
+                        await ctx.followup.send(content=chunk)
             else:
-                await ctx.respond(content=chunks[0])
-                for chunk in chunks[1:]:
-                    await ctx.followup.send(content=chunk)
-        else:
-                await ctx.respond(content=f"{content}")
+                await ctx.respond(content=content)
+
+        except Exception as e:
+            self.logger.error(f"Error in ask_pplx_ai command: {str(e)}")
+            error_message = "An error occurred while processing your request. Please try again later."
+            if await ctx.response.is_done():
+                await ctx.followup.send(content=error_message, ephemeral=True)
+            else:
+                await ctx.respond(content=error_message, ephemeral=True)
 
 def setup(bot):
     bot.add_cog(PPLXAICog(bot))
