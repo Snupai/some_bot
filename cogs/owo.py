@@ -1,3 +1,5 @@
+from io import BytesIO
+import aiohttp
 import discord
 from discord import SlashCommandGroup, IntegrationType, Option, Colour
 from discord.ext import commands
@@ -7,6 +9,7 @@ import logging
 import sqlite3
 from purrbot_site_api_wrapper import OwoApi, OWOifyRequest, OWOifySuccess, ImgSuccess, SfwApi, NsfwApi
 from purrbot_site_api_wrapper.rest import ApiException
+import requests
 
 def hex_to_rgb(hex_string):
     hex_string = hex_string.lstrip('#')
@@ -53,10 +56,29 @@ class OwoCog(commands.Cog):
             response: ImgSuccess = api_call()
             if response.error:
                 raise ApiException(response.error)
+            
+            # Validate the image URL
+            if not response.link or not response.link.startswith(('http://', 'https://')):
+                self.logger.error(f"Invalid image URL received: {response.link}")
+                await ctx.respond(content="Error: Invalid image URL received from the API.", ephemeral=True)
+                return
+            filetype = response.link.split(".")[-1]
+            async with aiohttp.ClientSession() as session:
+                async with session.get(response.link) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.read()
+            file = discord.File(BytesIO(data), filename=f"idk.{filetype}")
             embed = discord.Embed(colour=self.embed_colour, description=description, timestamp=datetime.datetime.now())
-            embed.set_image(url=response.link)
+            embed.set_image(url=f"attachment://idk.{filetype}")
             self.logger.debug(f"got response: '{response.link}'")
-            await ctx.respond(embed=embed)
+            
+            # Try to send the embed and handle any potential errors
+            try:
+                await ctx.respond(embed=embed, file=file)
+            except discord.HTTPException as e:
+                self.logger.error(f"Failed to send embed with image: {e}")
+                await ctx.respond(content="Error: Failed to display the image. The image URL might be invalid or expired.", ephemeral=True)
         except ApiException as e:
             self.logger.error(f"Error getting {description} gif: {e}")
             await ctx.respond(content=f"Error getting {description} gif: {e}", ephemeral=True)
@@ -108,7 +130,7 @@ class OwoCog(commands.Cog):
 
     @purr_sfw_group.command(integration_types={IntegrationType.guild_install, IntegrationType.user_install}, name="lay", description="lay")
     async def lay(self, ctx: discord.ApplicationContext):
-        await self.handle_sfw_command(ctx, SfwApi().img_sfw_lay_gif_get, f"{ctx.author.mention} lays")
+        await self.handle_sfw_command(ctx, SfwApi().img_sfw_lay_gif_get, f"{ctx.author.mention} lays down")
     
     @purr_sfw_group.command(integration_types={IntegrationType.guild_install, IntegrationType.user_install}, name="lick", description="lick")
     async def lick(self, ctx: discord.ApplicationContext,
@@ -264,10 +286,23 @@ class OwoCog(commands.Cog):
             response: ImgSuccess = api_call()
             if response.error:
                 raise ApiException(response.error)
+            
+            # Validate the image URL
+            if not response.link or not response.link.startswith(('http://', 'https://')):
+                self.logger.error(f"Invalid image URL received: {response.link}")
+                await ctx.respond(content="Error: Invalid image URL received from the API.", ephemeral=True)
+                return
+                
             embed = discord.Embed(colour=self.embed_colour, description=description, timestamp=datetime.datetime.now())
             embed.set_image(url=response.link)
             self.logger.debug(f"got response: '{response.link}'")
-            await ctx.respond(embed=embed)
+            
+            # Try to send the embed and handle any potential errors
+            try:
+                await ctx.respond(embed=embed)
+            except discord.HTTPException as e:
+                self.logger.error(f"Failed to send embed with image: {e}")
+                await ctx.respond(content="Error: Failed to display the image. The image URL might be invalid or expired.", ephemeral=True)
         except ApiException as e:
             self.logger.error(f"Error getting {command_name} gif: {e}")
             await ctx.respond(content=f"Error getting {command_name} gif: {e}", ephemeral=True)

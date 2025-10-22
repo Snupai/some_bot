@@ -1,5 +1,5 @@
 python-dotenv
-git+https://github.com/Pycord-Development/pycord.git@master # py-cord from master to use voice messages
+py-cord>=2.7.0rc2 # py-cord from master to use voice messages
 yt_dlp
 validators
 httpx
@@ -18,3 +18,5 @@ google-auth-oauthlib
 selenium
 webdriver-manager
 google-genai
+mcrcon
+mcstatus
