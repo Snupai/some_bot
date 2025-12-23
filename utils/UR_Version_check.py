@@ -1,6 +1,7 @@
 import re
 import json
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from selenium import webdriver
@@ -50,6 +51,103 @@ class URVersionChecker:
                                key=lambda x: [int(i) for i in x['version'].split('.')],
                                reverse=True)
         return sorted_versions[0] if sorted_versions else None
+
+    def parse_netscape_cookies(self, cookies_file='cookies.txt'):
+        """
+        Parse Netscape format cookies.txt file and return list of cookies in Selenium format.
+        
+        Netscape format: domain, flag, path, secure, expiration, name, value
+        """
+        cookies = []
+        cookies_path = Path(cookies_file)
+        
+        if not cookies_path.exists():
+            self.logger.warning(f"Cookies file {cookies_file} not found")
+            return cookies
+        
+        try:
+            with open(cookies_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    # Skip comments and empty lines
+                    if not line or line.startswith('#'):
+                        continue
+                    
+                    # Netscape format: domain, flag, path, secure, expiration, name, value
+                    parts = line.split('\t')
+                    if len(parts) >= 7:
+                        domain = parts[0]
+                        # flag = parts[1]  # TRUE if domain matches subdomains
+                        path = parts[2]
+                        secure = parts[3] == 'TRUE'
+                        expiration = int(parts[4]) if parts[4] != '0' else None
+                        name = parts[5]
+                        value = parts[6]
+                        
+                        # Only include cookies for universal-robots.com domains
+                        if 'universal-robots.com' in domain:
+                            selenium_cookie = {
+                                'name': name,
+                                'value': value,
+                                'domain': domain.lstrip('.') if domain.startswith('.') else domain,
+                                'path': path,
+                                'secure': secure,
+                            }
+                            # Only add expiry if it exists and is in the future
+                            if expiration:
+                                # Convert from milliseconds to seconds if needed
+                                expiry_seconds = expiration // 1000 if expiration > 10000000000 else expiration
+                                # Check if cookie hasn't expired
+                                if expiry_seconds > time.time():
+                                    selenium_cookie['expiry'] = expiry_seconds
+                            
+                            cookies.append(selenium_cookie)
+            
+            self.logger.info(f"Parsed {len(cookies)} cookies from {cookies_file} for universal-robots.com")
+            return cookies
+        except Exception as e:
+            self.logger.error(f"Error parsing cookies file: {e}")
+            return cookies
+
+    def load_cookies_to_driver(self, driver, cookies_file='cookies.txt'):
+        """Load cookies from cookies.txt file into Selenium driver"""
+        cookies = self.parse_netscape_cookies(cookies_file)
+        
+        if not cookies:
+            return False
+        
+        try:
+            loaded_count = 0
+            current_domain = driver.current_url.split('/')[2] if driver.current_url else 'www.universal-robots.com'
+            
+            for cookie in cookies:
+                try:
+                    domain = cookie.get('domain', '')
+                    
+                    # Remove leading dot for Selenium (it doesn't accept domain cookies with leading dot)
+                    if domain.startswith('.'):
+                        domain = domain[1:]
+                    
+                    cookie['domain'] = domain
+                    
+                    # Try to add the cookie - Selenium will reject it if domain doesn't match
+                    driver.add_cookie(cookie)
+                    loaded_count += 1
+                    
+                except Exception as e:
+                    # Silently skip cookies that can't be added (wrong domain, expired, etc.)
+                    self.logger.debug(f"Could not add cookie {cookie.get('name', 'unknown')}: {e}")
+                    continue
+            
+            if loaded_count > 0:
+                self.logger.info(f"Successfully loaded {loaded_count} cookies into driver")
+            else:
+                self.logger.warning("No cookies could be loaded (domain mismatch or expired)")
+            
+            return loaded_count > 0
+        except Exception as e:
+            self.logger.warning(f"Error loading cookies to driver: {e}")
+            return False
 
     async def check_version(self, force=False):
         driver = None
@@ -142,6 +240,13 @@ class URVersionChecker:
                 self.logger.info(f"Navigating to {self.url}")
                 driver.get(self.url)
                 await asyncio.sleep(2)
+                
+                # Load cookies from cookies.txt if available
+                cookies_loaded = self.load_cookies_to_driver(driver, 'cookies.txt')
+                if cookies_loaded:
+                    driver.refresh()
+                    await asyncio.sleep(2)
+                    self.logger.info("Cookies loaded, refreshed page")
                 
                 # Try to find and click the cookie consent button
                 try:
