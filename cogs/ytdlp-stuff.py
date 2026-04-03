@@ -12,6 +12,9 @@ import validators
 import os
 import tempfile
 import re
+import sys
+import importlib
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import yt_dlp as youtube_dl
 import spotipy
 from pydub import AudioSegment
@@ -19,6 +22,54 @@ import base64
 import sqlite3
 
 COOKIES_FILE = 'cookies.txt'
+
+# Deno + EJS: yt-dlp needs a JS runtime and (on recent versions) permission to fetch EJS scripts.
+_deno_exe = Path.home() / ".deno" / "bin" / "deno"
+if _deno_exe.is_file():
+    _deno_dir = str(_deno_exe.parent)
+    if _deno_dir not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = _deno_dir + os.pathsep + os.environ.get("PATH", "")
+
+_ytdlp_pip_lock = asyncio.Lock()
+
+
+async def _upgrade_ytdlp_and_reload(logger: logging.Logger) -> bool:
+    """Upgrade yt-dlp in the current environment and reload the module. Serialized with a lock."""
+    async with _ytdlp_pip_lock:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "-U",
+                "--quiet",
+                "yt-dlp",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                logger.error("yt-dlp upgrade timed out after 180s")
+                return False
+            if proc.returncode != 0:
+                err = (stderr or b"").decode(errors="replace").strip()
+                out = (stdout or b"").decode(errors="replace").strip()
+                logger.error(f"pip upgrade yt-dlp failed (exit {proc.returncode}): {err or out}")
+                return False
+            importlib.reload(youtube_dl)
+            try:
+                ver = youtube_dl.version.__version__
+            except Exception:
+                ver = "unknown"
+            logger.info(f"yt-dlp upgraded and reloaded (version: {ver})")
+            return True
+        except Exception as e:
+            logger.error(f"yt-dlp upgrade failed: {e}")
+            return False
 
 
 def _cookiefile_opts():
@@ -31,6 +82,9 @@ def _cookiefile_opts():
 def _base_ydl_opts():
     return {
         **_cookiefile_opts(),
+        # Allow yt-dlp to download the YouTube challenge solver (needs Deno on PATH). See:
+        # https://github.com/yt-dlp/yt-dlp/wiki/EJS
+        'remote_components': {'ejs:github'},
         'quiet': True,
         'no_warnings': True,
         'nocheckcertificate': True,
@@ -49,6 +103,107 @@ def _base_ydl_opts():
             'Accept-Language': 'en-us,en;q=0.5',
         },
     }
+
+
+def _strip_youtube_playlist_params(url: str) -> str:
+    """Drop mix/playlist/index query params so yt-dlp treats the URL as a single video."""
+    try:
+        p = urlparse(url.strip())
+        host = (p.hostname or '').lower()
+        if host in ('youtu.be', 'www.youtu.be'):
+            return urlunparse((p.scheme or 'https', p.netloc, p.path, '', '', ''))
+        if host.endswith('youtube.com') and p.path in ('/watch', '/watch/'):
+            qs = dict(parse_qsl(p.query))
+            v = qs.get('v')
+            if v:
+                return urlunparse(
+                    (p.scheme or 'https', p.netloc, '/watch', '', urlencode({'v': v}), '')
+                )
+    except Exception:
+        pass
+    return url
+
+
+def _is_youtube_url(url: str) -> bool:
+    try:
+        h = (urlparse(url).hostname or '').lower()
+    except Exception:
+        return False
+    return (
+        h == 'youtu.be'
+        or h.endswith('.youtube.com')
+        or h.endswith('youtube-nocookie.com')
+    )
+
+
+def _audio_ydl_opts(url: str | None = None, *, force_youtube: bool = False) -> dict:
+    """Prefer audio streams; avoid default format failing on some YouTube videos."""
+    opts: dict = {
+        'format': 'bestaudio/best/worst/worstaudio/worst',
+    }
+    if force_youtube or (url and _is_youtube_url(url)):
+        # With cookies, android/ios clients are skipped by yt-dlp; use web-family only.
+        opts['extractor_args'] = {
+            'youtube': {
+                'player_client': ['web', 'mweb'],
+            },
+        }
+    return opts
+
+
+def _ytdlp_user_hint_extra(msg: str) -> str:
+    """Append install hint when errors are usually fixed by EJS / Deno, not cookies."""
+    m = msg.lower()
+    if any(
+        x in m
+        for x in (
+            'requested format is not available',
+            'javascript runtime',
+            'signature solving',
+            'only images are available',
+            'n challenge solving',
+        )
+    ):
+        return (
+            f"{msg}\n\n"
+            "On servers without a JS runtime, yt-dlp cannot unlock normal YouTube audio formats. "
+            "Install Deno (or Node per the wiki), then restart the bot: "
+            "https://github.com/yt-dlp/yt-dlp/wiki/EJS"
+        )
+    return msg
+
+
+def _download_error_unlikely_fixed_by_ytdlp_upgrade(msg: str) -> bool:
+    """If True, skip pip upgrade + retry (same yt-dlp version will likely fail the same way)."""
+    m = msg.lower()
+    needles = (
+        'requested format is not available',
+        'private video',
+        'members only',
+        'video unavailable',
+        'copyright',
+        'blocked',
+        'login required',
+        'payment required',
+    )
+    return any(n in m for n in needles)
+
+
+def _coerce_single_video_info(info):
+    """Use one video dict from playlist/mix results; skip None placeholders in entries."""
+    if not info or not isinstance(info, dict):
+        return None
+    entries = info.get('entries')
+    if entries is None:
+        return info
+    if not isinstance(entries, list):
+        return info
+    if not entries:
+        return None
+    for ent in entries:
+        if isinstance(ent, dict):
+            return ent
+    return None
 
 
 def _sanitize_title_for_fs(title: str) -> str:
@@ -90,6 +245,8 @@ class YoutubeDLPCog(commands.Cog):
 
         if not await self.validate_url(ctx, url):
             return
+
+        url = _strip_youtube_playlist_params(url.strip())
 
         try:
             url = await self.handle_spotify_url(url)
@@ -150,21 +307,36 @@ class YoutubeDLPCog(commands.Cog):
                 search_query = f"{artist} - {title}"
                 self.logger.info(f"Generated search query: {search_query}")
                 
+                # extract_flat + ytsearch1 avoids full format merge (needs JS/EJS on the server).
                 ydl_opts = {
                     **_base_ydl_opts(),
-                    'default_search': 'ytsearch',
-                    'format': 'bestaudio/best',
-                    'extract_audio': True,
-                    'audio_format': 'opus',
-                    'audio_quality': 192,
+                    'extract_flat': True,
                 }
 
-                with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(search_query, download=False)
-                    if not info or 'entries' not in info or not info['entries']:
-                        raise Exception("No YouTube results found for Spotify track")
-                    url = info['entries'][0]['webpage_url']
-                    self.logger.info(f"Found YouTube URL: {url}")
+                info = None
+                for attempt in range(2):
+                    try:
+                        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+                            info = ydl.extract_info(
+                                f'ytsearch1:{search_query}',
+                                download=False,
+                            )
+                        break
+                    except youtube_dl.DownloadError as e:
+                        if (
+                            attempt == 0
+                            and not _download_error_unlikely_fixed_by_ytdlp_upgrade(str(e))
+                            and await _upgrade_ytdlp_and_reload(self.logger)
+                        ):
+                            continue
+                        raise
+                if not info or 'entries' not in info or not info['entries']:
+                    raise Exception("No YouTube results found for Spotify track")
+                first = info['entries'][0]
+                url = first.get('webpage_url') or first.get('url')
+                if not url:
+                    raise Exception("No YouTube results found for Spotify track")
+                self.logger.info(f"Found YouTube URL: {url}")
                     
             return url
         except Exception as e:
@@ -175,33 +347,80 @@ class YoutubeDLPCog(commands.Cog):
         self.logger.info(f"Attempting to extract info from URL: {url}")
         
         # Clean and validate URL
-        url = url.strip()
+        url = _strip_youtube_playlist_params(url.strip())
         if not validators.url(url):
             await ctx.respond(content="Invalid URL provided. Please check the URL and try again.", ephemeral=True)
             return None
 
-        ydl = youtube_dl.YoutubeDL({
+        ydl_opts = {
             **_base_ydl_opts(),
             'extract_flat': False,
             'ignoreerrors': False,
-        })
-        
+            'noplaylist': True,
+        }
+        if not _is_youtube_url(url):
+            ydl_opts.update(_audio_ydl_opts(url))
+
         try:
             self.logger.info("Starting info extraction...")
-            info = ydl.extract_info(url, download=False)
-            
+            info = None
+            for attempt in range(2):
+                try:
+                    with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+                        # Direct YouTube watch URLs: skip full processing so we do not need
+                        # JS/EJS just to read title/duration (download still needs a JS runtime).
+                        if _is_youtube_url(url):
+                            info = ydl.extract_info(url, download=False, process=False)
+                        else:
+                            info = ydl.extract_info(url, download=False)
+                    break
+                except youtube_dl.DownloadError as e:
+                    self.logger.warning(
+                        f"DownloadError during extraction (attempt {attempt + 1}): {str(e)}"
+                    )
+                    if (
+                        attempt == 0
+                        and not _download_error_unlikely_fixed_by_ytdlp_upgrade(str(e))
+                        and await _upgrade_ytdlp_and_reload(self.logger)
+                    ):
+                        self.logger.info("Retrying info extraction after yt-dlp upgrade")
+                        continue
+                    self.logger.error(f"DownloadError during extraction: {str(e)}")
+                    await ctx.respond(
+                        content=_ytdlp_user_hint_extra(
+                            f"Error extracting info from the URL: {str(e)}. "
+                            "If the video exists, try again after the bot updated yt-dlp; "
+                            "otherwise the video may be unavailable."
+                        ),
+                        ephemeral=True,
+                    )
+                    return None
+
             if not info:
                 self.logger.error("No info extracted from URL")
                 await ctx.respond(content="Could not extract information from the URL. Please check if the video is available and try again.", ephemeral=True)
                 return None
-                
+
+            info = _coerce_single_video_info(info)
+            if not info:
+                self.logger.error("Extraction returned no usable video entry (empty playlist?)")
+                await ctx.respond(
+                    content="Could not get a single video from that link. Try a direct watch URL without a mix/playlist.",
+                    ephemeral=True,
+                )
+                return None
+
+            if info.get('duration') is None:
+                self.logger.error("Video has no duration (live or unavailable metadata)")
+                await ctx.respond(
+                    content="This video has no fixed duration (live stream or missing metadata). /dl_trim needs a normal video with a known length.",
+                    ephemeral=True,
+                )
+                return None
+
             self.logger.info(f"Successfully extracted info for: {info.get('title', 'Unknown Title')}")
             return info
-            
-        except youtube_dl.DownloadError as e:
-            self.logger.error(f"DownloadError during extraction: {str(e)}")
-            await ctx.respond(content=f"Error extracting info from the URL: {str(e)}. Please check if the video is available and try again.", ephemeral=True)
-            return None
+
         except Exception as e:
             self.logger.error(f"Unexpected error during extraction: {str(e)}")
             await ctx.respond(content=f"Unexpected error while extracting info: {str(e)}", ephemeral=True)
@@ -210,7 +429,7 @@ class YoutubeDLPCog(commands.Cog):
     async def prepare_download(self, ctx, info, begin, end):
         if end is None:
             end = info['duration']
-        raw_title = str(info['title'])
+        raw_title = str(info.get('title') or 'audio')
         self.logger.debug(f"Type of title before modification: {type(raw_title)}")
 
         title = f"{_sanitize_title_for_fs(raw_title)}_{uuid.uuid4()}"
@@ -244,7 +463,7 @@ class YoutubeDLPCog(commands.Cog):
         out_base = work_dir / title
         ydl_opts = {
             **_base_ydl_opts(),
-            'format': 'bestaudio/best',
+            **_audio_ydl_opts(url),
             'outtmpl': str(out_base) + '.%(ext)s',
             'restrictfilenames': True,
             'noplaylist': True,
@@ -257,28 +476,43 @@ class YoutubeDLPCog(commands.Cog):
             }],
         }
         loop = asyncio.get_event_loop()
-        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-            try:
-                self.logger.info(f"Starting download for URL: {url}")
-                await loop.run_in_executor(None, lambda: ydl.download([url]))
+        try:
+            for attempt in range(2):
+                try:
+                    with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+                        self.logger.info(f"Starting download for URL: {url}")
+                        await loop.run_in_executor(None, lambda y=ydl: y.download([url]))
 
-                opus_path = out_base.with_suffix('.opus')
-                if not opus_path.is_file():
-                    self.logger.error(f"Download completed but file {opus_path} not found")
-                    await ctx.respond(content="Failed to download the audio file. Please try again.", ephemeral=True)
+                    opus_path = out_base.with_suffix('.opus')
+                    if not opus_path.is_file():
+                        self.logger.error(f"Download completed but file {opus_path} not found")
+                        await ctx.respond(content="Failed to download the audio file. Please try again.", ephemeral=True)
+                        return False
+
+                    self.logger.info(f"Successfully downloaded and converted audio to {opus_path}")
+                    return True
+
+                except youtube_dl.DownloadError as e:
+                    self.logger.warning(
+                        f"DownloadError during download (attempt {attempt + 1}): {str(e)}"
+                    )
+                    if (
+                        attempt == 0
+                        and not _download_error_unlikely_fixed_by_ytdlp_upgrade(str(e))
+                        and await _upgrade_ytdlp_and_reload(self.logger)
+                    ):
+                        self.logger.info("Retrying download after yt-dlp upgrade")
+                        continue
+                    self.logger.error(f"DownloadError during download: {str(e)}")
+                    await ctx.respond(
+                        content=_ytdlp_user_hint_extra(f"Error downloading the audio file: {str(e)}"),
+                        ephemeral=True,
+                    )
                     return False
-
-                self.logger.info(f"Successfully downloaded and converted audio to {opus_path}")
-                return True
-
-            except youtube_dl.DownloadError as e:
-                self.logger.error(f"DownloadError during download: {str(e)}")
-                await ctx.respond(content=f"Error downloading the audio file: {str(e)}", ephemeral=True)
-                return False
-            except Exception as e:
-                self.logger.error(f"Unexpected error during download: {str(e)}")
-                await ctx.respond(content=f"Unexpected error while downloading: {str(e)}", ephemeral=True)
-                return False
+        except Exception as e:
+            self.logger.error(f"Unexpected error during download: {str(e)}")
+            await ctx.respond(content=f"Unexpected error while downloading: {str(e)}", ephemeral=True)
+            return False
 
     async def trim_audio(self, ctx, title, begin, end, work_dir: Path):
         try:
@@ -389,23 +623,50 @@ class YoutubeDLPCog(commands.Cog):
                 artist = track_info['artists'][0]['name']
                 title = track_info['name']
                 
-                # Search on YouTube
+                # Search on YouTube (flat search avoids needing JS for metadata)
                 search_query = f"{artist} - {title}"
                 ydl_opts = {
-                    'default_search': 'ytsearch',
-                    'quiet': True,
-                    'cookiefile': COOKIES_FILE, 
+                    **_base_ydl_opts(),
+                    'extract_flat': True,
                 }
-                with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(search_query, download=False)
-                    video_url = info['entries'][0]['webpage_url']
-                
+                info = None
+                for attempt in range(2):
+                    try:
+                        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+                            info = ydl.extract_info(f'ytsearch1:{search_query}', download=False)
+                        break
+                    except youtube_dl.DownloadError as e:
+                        if (
+                            attempt == 0
+                            and not _download_error_unlikely_fixed_by_ytdlp_upgrade(str(e))
+                            and await _upgrade_ytdlp_and_reload(self.logger)
+                        ):
+                            continue
+                        raise
+                first = info['entries'][0]
+                video_url = first.get('webpage_url') or first.get('url')
+
                 await ctx.respond(content=f"Found YouTube link for '{artist} - {title}': {video_url}", ephemeral=ephemeral)
                 return
 
             # Handle non-Spotify URLs
-            ydl = youtube_dl.YoutubeDL({'cookiefile': COOKIES_FILE})
-            info = ydl.extract_info(url, download=False)
+            info = None
+            for attempt in range(2):
+                try:
+                    ydl = youtube_dl.YoutubeDL({
+                        **_cookiefile_opts(),
+                        **_audio_ydl_opts(url),
+                    })
+                    info = ydl.extract_info(url, download=False)
+                    break
+                except youtube_dl.DownloadError as e:
+                    if (
+                        attempt == 0
+                        and not _download_error_unlikely_fixed_by_ytdlp_upgrade(str(e))
+                        and await _upgrade_ytdlp_and_reload(self.logger)
+                    ):
+                        continue
+                    raise
             if 'entries' in info:
                 video_url = info['entries'][0]['webpage_url']
             else:

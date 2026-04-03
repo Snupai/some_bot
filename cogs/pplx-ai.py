@@ -2,6 +2,7 @@ if __name__ == "__main__":
     print("This is a cog file and cannot be run directly.")
     exit()
 
+import io
 import discord
 from discord.ext import commands
 import logging
@@ -12,9 +13,10 @@ import re
 import sqlite3
 
 class PplxAiModels(enum.Enum):
-    LLAMA_3_1_SONAR_SMALL_128K_ONLINE = "llama-3.1-sonar-small-128k-online"
-    LLAMA_3_1_SONAR_LARGE_128K_ONLINE = "llama-3.1-sonar-large-128k-online"
-    LLAMA_3_1_SONAR_HUGE_128K_ONLINE = "llama-3.1-sonar-huge-128k-online"
+    SONAR = "sonar"
+    SONAR_PRO = "sonar-pro"
+    SONAR_REASONING_PRO = "sonar-reasoning-pro"
+    SONAR_DEEP_RESEARCH = "sonar-deep-research"
 
 
 class PPLXAICog(commands.Cog):
@@ -23,6 +25,11 @@ class PPLXAICog(commands.Cog):
         self.logger = logging.getLogger('bot.py')
         
     pplxai = discord.SlashCommandGroup(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="pplx-ai", description="Perplexity AI API")
+
+    @staticmethod
+    def _file_from_text(content: str, filename: str = "response.txt") -> discord.File:
+        buf = io.BytesIO(content.encode("utf-8"))
+        return discord.File(fp=buf, filename=filename)
     
     def split_text(self, text: str, max_length: int = 1900) -> list[str]:
         """
@@ -118,7 +125,7 @@ class PPLXAICog(commands.Cog):
             await ctx.defer()
 
             if model is None:
-                model = PplxAiModels.LLAMA_3_1_SONAR_SMALL_128K_ONLINE.value
+                model = PplxAiModels.SONAR.value
 
             if not os.getenv('PPLX_TOKEN'):
                 await ctx.respond("Error: PPLX_TOKEN environment variable is not set.", ephemeral=True)
@@ -141,26 +148,20 @@ class PPLXAICog(commands.Cog):
                     },
                 ]
             )
-            citations = response.citations
+            citations = getattr(response, "citations", None) or []
             content = response.choices[0].message.content
             content = content.replace("####", "###") # for discord compatibility
 
-            # Replace occurrences of [n] with [[n]](citations[n])
             for index, citation in enumerate(citations):
                 content = content.replace(f"[{index}]", f"[[{index}]](<{citation}>)")
 
-            with open("temp_pplx_ai.txt", "w", encoding='utf-8') as file:
-                file.write(content)
-
             if len(content) > 1900:  
                 chunks = self.split_text(content)
-                # if there are more than 6 chunks write send the temp file as an attachment instead of sending the chunks
                 if len(chunks) > 6:
-                    with open("temp_pplx_ai.txt", "w", encoding='utf-8') as file:
-                        file.write(content)
-                    file = discord.File(fp="temp_pplx_ai.txt", filename="response.txt", description=f"Response from PPLX AI for:\n{prompt}")
-                    await ctx.respond(content=f"Response from PPLX AI for:\n{prompt}", file=file)
-                    os.remove("temp_pplx_ai.txt")
+                    await ctx.respond(
+                        content=f"Response from PPLX AI for:\n{prompt}",
+                        file=self._file_from_text(content),
+                    )
                 else:
                     await ctx.respond(content=chunks[0])
                     for chunk in chunks[1:]:

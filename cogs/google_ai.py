@@ -2,6 +2,7 @@ if __name__ == "__main__":
     print("This is a cog file and cannot be run directly.")
     exit()
 
+import io
 import logging
 import re
 import sqlite3
@@ -13,11 +14,12 @@ import os
 from enum import Enum
 
 class Model(Enum):
-    GEMINI_2_0_FLASH = "gemini-2.0-flash" # is the only model that supports google search
+    GEMINI_2_0_FLASH = "gemini-2.0-flash"
     GEMINI_2_0_FLASH_LITE = "gemini-2.0-flash-lite"
-    GEMINI_2_0_FLASH_THINKING_EXP_01_21 = "gemini-2.0-flash-thinking-exp-01-21"
-    GEMINI_2_5_PRO_EXP_03_25 = "gemini-2.5-pro-exp-03-25"
-    GEMINI_2_5_FLASH_PREVIEW_04_17 = "gemini-2.5-flash-preview-04-17"
+    # Former experimental "thinking" model; mapped to stable 2.5 Flash (reasoning-capable).
+    GEMINI_2_0_FLASH_THINKING_EXP_01_21 = "gemini-2.5-flash"
+    GEMINI_2_5_PRO = "gemini-2.5-pro"
+    GEMINI_2_5_FLASH = "gemini-2.5-flash"
     
 class GoogleAI(commands.Cog):
     def __init__(self, bot):
@@ -26,6 +28,11 @@ class GoogleAI(commands.Cog):
         self.client = genai.Client(api_key=os.getenv("GOOGLE_AI_API_KEY"))
 
     googleai = discord.SlashCommandGroup(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="google-ai", description="Google AI API")
+
+    @staticmethod
+    def _file_from_text(content: str, filename: str = "response.txt") -> discord.File:
+        buf = io.BytesIO(content.encode("utf-8"))
+        return discord.File(fp=buf, filename=filename)
 
     def split_text(self, text: str, max_length: int = 1900) -> list[str]:
         """
@@ -155,11 +162,11 @@ class GoogleAI(commands.Cog):
                 chunks = self.split_text(content)
                 # if there are more than 6 chunks write send the temp file as an attachment instead of sending the chunks
                 if len(chunks) > 6:
-                    with open("temp_gemini_2_0_flash.txt", "w", encoding='utf-8') as file:
-                        file.write(content)
-                    file = discord.File(fp="temp_gemini_2_0_flash.txt", filename="response.txt", description=f"Response from Google AI for:\n{question}")
-                    await ctx.respond(content=f"Response from Google AI for:\n{question}", file=file, ephemeral=ephemeral)
-                    os.remove("temp_gemini_2_0_flash.txt")
+                    await ctx.respond(
+                        content=f"Response from Google AI for:\n{question}",
+                        file=self._file_from_text(content),
+                        ephemeral=ephemeral,
+                    )
                 else:
                     await ctx.respond(content=chunks[0], ephemeral=ephemeral)
                     for chunk in chunks[1:]:
@@ -204,11 +211,11 @@ class GoogleAI(commands.Cog):
             if len(content) > 1900:
                 chunks = self.split_text(content)
                 if len(chunks) > 6:
-                    with open("temp_gemini_2_0_flash_lite.txt", "w", encoding='utf-8') as file:
-                        file.write(content)
-                    file = discord.File(fp="temp_gemini_2_0_flash_lite.txt", filename="response.txt", description=f"Response from Google AI for:\n{question}")
-                    await ctx.respond(content=f"Response from Google AI for:\n{question}", file=file, ephemeral=ephemeral)
-                    os.remove("temp_gemini_2_0_flash_lite.txt")
+                    await ctx.respond(
+                        content=f"Response from Google AI for:\n{question}",
+                        file=self._file_from_text(content),
+                        ephemeral=ephemeral,
+                    )
                 else:
                     await ctx.respond(content=chunks[0], ephemeral=ephemeral)
                     for chunk in chunks[1:]:
@@ -219,7 +226,7 @@ class GoogleAI(commands.Cog):
         except Exception as e:
             await ctx.send(f"An error occurred: {e}", ephemeral=True)
 
-    @googleai.command(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="gemini_2_0_flash_thinking", description="Ask Google AI using Gemini 2.0 Flash Thinking model")
+    @googleai.command(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="gemini_2_0_flash_thinking", description="Ask Google AI (Gemini 2.5 Flash — reasoning; replaces legacy Flash Thinking experimental)")
     async def ask_google_ai_thinking_exp_01_21(self, ctx, 
                                                 question: str = discord.Option(str, name="question", description="The question to ask Google AI", required=True),
                                                 ephemeral: bool = discord.Option(bool, name="ephemeral", description="Whether to send the response as an ephemeral message", required=False, default=False, store_true=True)):
@@ -253,11 +260,11 @@ class GoogleAI(commands.Cog):
             if len(content) > 1900:
                 chunks = self.split_text(content)
                 if len(chunks) > 6:
-                    with open("temp_gemini_2_0_flash_thinking_exp_01_21.txt", "w", encoding='utf-8') as file:
-                        file.write(content)
-                    file = discord.File(fp="temp_gemini_2_0_flash_thinking_exp_01_21.txt", filename="response.txt", description=f"Response from Google AI for:\n{question}")
-                    await ctx.respond(content=f"Response from Google AI for:\n{question}", file=file, ephemeral=ephemeral)
-                    os.remove("temp_gemini_2_0_flash_thinking_exp_01_21.txt")
+                    await ctx.respond(
+                        content=f"Response from Google AI for:\n{question}",
+                        file=self._file_from_text(content),
+                        ephemeral=ephemeral,
+                    )
                 else:
                     await ctx.respond(content=chunks[0], ephemeral=ephemeral)
                     for chunk in chunks[1:]:
@@ -268,7 +275,7 @@ class GoogleAI(commands.Cog):
         except Exception as e:
             await ctx.send(f"An error occurred: {e}", ephemeral=True)
 
-    @googleai.command(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="gemini_2_5_pro", description="Ask Google AI using Gemini 2.5 Pro model with optional web search")
+    @googleai.command(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="gemini_2_5_pro", description="Ask Google AI using Gemini 2.5 Pro with optional web search")
     async def ask_google_ai_pro_exp_03_25(self, ctx, 
                                     question: str = discord.Option(str, name="question", description="The question to ask Google AI", required=True),
                                     web_search: bool = discord.Option(bool, name="web_search", description="Whether to enable web search", required=False, default=False, store_true=True),
@@ -281,7 +288,7 @@ class GoogleAI(commands.Cog):
                 tools=[
                     types.Tool(google_search=types.GoogleSearch())
                 ]
-                with open("cogs/google_ai_sys_prompts/gemini_2_5_pro_exp_websearch.md", "r", encoding='utf-8') as file:
+                with open("cogs/google_ai_sys_prompts/gemini_2_5_pro_exp_03_25_websearch.md", "r", encoding='utf-8') as file:
                     system_prompt = file.read()
                 system_prompt = system_prompt.replace("{{userid}}", str(ctx.author.id))
                 config = types.GenerateContentConfig(
@@ -289,7 +296,7 @@ class GoogleAI(commands.Cog):
                     tools=tools
                 )
             else:   
-                with open("cogs/google_ai_sys_prompts/gemini_2_5_pro_exp.md", "r", encoding='utf-8') as file:
+                with open("cogs/google_ai_sys_prompts/gemini_2_5_pro_exp_03_25.md", "r", encoding='utf-8') as file:
                     system_prompt = file.read()
                 system_prompt = system_prompt.replace("{{userid}}", str(ctx.author.id))
                 config = types.GenerateContentConfig(
@@ -307,7 +314,7 @@ class GoogleAI(commands.Cog):
 
             await ctx.defer(ephemeral=ephemeral)
 
-            response = self.client.models.generate_content(model=Model.GEMINI_2_5_PRO_EXP_03_25.value, 
+            response = self.client.models.generate_content(model=Model.GEMINI_2_5_PRO.value, 
                                                     contents=contents, 
                                                     config=config)
             content = response.text 
@@ -315,12 +322,12 @@ class GoogleAI(commands.Cog):
             
             if len(content) > 1900:
                 chunks = self.split_text(content)
-                if len(chunks) > 6: 
-                    with open("temp_gemini_2_5_pro_exp.txt", "w", encoding='utf-8') as file:
-                        file.write(content)
-                    file = discord.File(fp="temp_gemini_2_5_pro_exp.txt", filename="response.txt", description=f"Response from Google AI for:\n{question}")
-                    await ctx.respond(content=f"Response from Google AI for:\n{question}", file=file, ephemeral=ephemeral)
-                    os.remove("temp_gemini_2_5_pro_exp.txt")
+                if len(chunks) > 6:
+                    await ctx.respond(
+                        content=f"Response from Google AI for:\n{question}",
+                        file=self._file_from_text(content),
+                        ephemeral=ephemeral,
+                    )
                 else:
                     await ctx.respond(content=chunks[0], ephemeral=ephemeral)
                     for chunk in chunks[1:]:
@@ -331,7 +338,7 @@ class GoogleAI(commands.Cog):
         except Exception as e:  
             await ctx.send(f"An error occurred: {e}", ephemeral=True)
             
-    @googleai.command(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="gemini_2_5_flash", description="Ask Google AI using Gemini 2.5 Flash model with optional web search")
+    @googleai.command(integration_types={discord.IntegrationType.guild_install, discord.IntegrationType.user_install}, name="gemini_2_5_flash", description="Ask Google AI using Gemini 2.5 Flash with optional web search")
     async def ask_google_ai_flash_preview_04_17(self, ctx, 
                                     question: str = discord.Option(str, name="question", description="The question to ask Google AI", required=True),
                                     web_search: bool = discord.Option(bool, name="web_search", description="Whether to enable web search", required=False, default=False, store_true=True),
@@ -370,7 +377,7 @@ class GoogleAI(commands.Cog):
 
             await ctx.defer(ephemeral=ephemeral)
 
-            response = self.client.models.generate_content(model=Model.GEMINI_2_5_FLASH_PREVIEW_04_17.value, 
+            response = self.client.models.generate_content(model=Model.GEMINI_2_5_FLASH.value, 
                                                     contents=contents, 
                                                     config=config)
             content = response.text 
@@ -378,12 +385,12 @@ class GoogleAI(commands.Cog):
             
             if len(content) > 1900:
                 chunks = self.split_text(content)
-                if len(chunks) > 6: 
-                    with open("temp_gemini_2_5_flash_preview_04_17.txt", "w", encoding='utf-8') as file:
-                        file.write(content)
-                    file = discord.File(fp="temp_gemini_2_5_flash_preview_04_17.txt", filename="response.txt", description=f"Response from Google AI for:\n{question}")
-                    await ctx.respond(content=f"Response from Google AI for:\n{question}", file=file, ephemeral=ephemeral)
-                    os.remove("temp_gemini_2_5_flash_preview_04_17.txt")
+                if len(chunks) > 6:
+                    await ctx.respond(
+                        content=f"Response from Google AI for:\n{question}",
+                        file=self._file_from_text(content),
+                        ephemeral=ephemeral,
+                    )
                 else:
                     await ctx.respond(content=chunks[0], ephemeral=ephemeral)
                     for chunk in chunks[1:]:

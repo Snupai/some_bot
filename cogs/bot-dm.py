@@ -15,21 +15,8 @@ import asyncio
 
 bot_owner_id = 239809113125552129
 DB_FILE = "user_threads.sqlite"
-ASSISTANT_ID = "asst_n2rpn7o0MVIwSMihnPUuV3LI"
-ai_model = "gpt-4o-mini"
-
-model_token_encodings: dict = {
-    "gpt-4o": "o200k_base",
-    "gpt-4o-mini": "o200k_base",
-    "gpt-4-turbo": "cl100k_base",
-    "gpt-4": "cl100k_base",
-    "gpt-3.5-turbo": "cl100k_base",
-    "text-embedding-ada-002": "cl100k_base",
-    "text-embedding-3-small": "cl100k_base",
-    "text-embedding-3-large": "cl100k_base",
-    "text-davinci-002": "p50k_base",
-    "text-davinci-003": "p50k_base",
-}
+ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID", "asst_n2rpn7o0MVIwSMihnPUuV3LI")
+ai_model = os.getenv("OPENAI_TOKEN_COUNT_MODEL", "gpt-4o-mini")
 
 class BotDMCog(commands.Cog):
     def __init__(self, bot):
@@ -148,9 +135,11 @@ class BotDMCog(commands.Cog):
             conn.close()
 
     async def get_token_count(self, text, model):
-        encoding = model_token_encodings[model]
-        tokens = tiktoken.get_encoding(encoding).encode(text)
-        return len(tokens)
+        try:
+            enc = tiktoken.encoding_for_model(model)
+        except KeyError:
+            enc = tiktoken.get_encoding("o200k_base")
+        return len(enc.encode(text))
 
     @commands.Cog.listener()
     async def on_message(self, message):
