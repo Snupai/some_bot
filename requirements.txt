@@ -1,3 +1,4 @@
+# owo cog: install sibling package (see pyproject.toml); pip alone cannot resolve path deps — use `uv sync` or `pip install -e ../purrbot_site_api_wrapper`
 python-dotenv
 py-cord>=2.7.0rc2 # py-cord from master to use voice messages
 yt_dlp

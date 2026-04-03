@@ -1,13 +1,14 @@
 import discord
 from discord.ext import commands, tasks
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import asyncio
 from utils.youtube_helpers import YouTubeRateLimiter, YouTubeCache, safe_api_call
 import os
 import logging
+from typing import Optional
 
 class YouTubeNotifications(commands.Cog):
     def __init__(self, bot):
@@ -16,6 +17,7 @@ class YouTubeNotifications(commands.Cog):
         self.db = sqlite3.connect('youtube_notifications.sqlite')
         self.cursor = self.db.cursor()
         self.create_tables()
+        self._uploads_playlist_cache = {}
         self.youtube = build('youtube', 'v3', developerKey=os.getenv('YOUTUBE_DATA_API_KEY'))
         self.rate_limiter = YouTubeRateLimiter()
         self.cache = YouTubeCache()
@@ -35,58 +37,117 @@ class YouTubeNotifications(commands.Cog):
             )
         ''')
         self.db.commit()
+        try:
+            self.cursor.execute(
+                'ALTER TABLE youtube_subscriptions ADD COLUMN last_video_published_at TEXT'
+            )
+            self.db.commit()
+        except sqlite3.OperationalError:
+            pass
 
-    async def fetch_latest_video(self, channel_id):
-        # Check cache first
-        cached_result = self.cache.get(f"latest_video_{channel_id}")
-        if cached_result:
-            return cached_result
+    def _get_uploads_playlist_id(self, channel_id: str) -> Optional[str]:
+        cached = self._uploads_playlist_cache.get(channel_id)
+        if cached is not None:
+            return cached
+        request = self.youtube.channels().list(
+            part='contentDetails',
+            id=channel_id
+        )
+        response = safe_api_call(request)
+        if not response.get('items'):
+            return None
+        uploads = (
+            response['items'][0]
+            .get('contentDetails', {})
+            .get('relatedPlaylists', {})
+            .get('uploads')
+        )
+        if not uploads:
+            return None
+        self._uploads_playlist_cache[channel_id] = uploads
+        return uploads
+
+    async def fetch_latest_video(self, channel_id, use_cache: bool = True):
+        """
+        Latest upload via the channel uploads playlist (stable ordering).
+        Search API order=date is unreliable (Shorts vs long-form, reordering).
+        """
+        cache_key = f"latest_video_{channel_id}"
+        if use_cache:
+            cached_result = self.cache.get(cache_key)
+            if cached_result:
+                return cached_result
 
         await self.rate_limiter.wait_if_needed()
-        
+
         try:
-            request = self.youtube.search().list(
-                part='id',
-                channelId=channel_id,
-                order='date',
-                maxResults=1,
-                type='video'
+            uploads_playlist_id = self._get_uploads_playlist_id(channel_id)
+            if not uploads_playlist_id:
+                return None
+
+            await self.rate_limiter.wait_if_needed()
+            pl_request = self.youtube.playlistItems().list(
+                part='snippet,contentDetails',
+                playlistId=uploads_playlist_id,
+                maxResults=1
             )
-            response = safe_api_call(request)
-            
-            if response.get('items'):
-                video_id = response['items'][0]['id']['videoId']
-                
-                # Fetch additional video details
-                video_request = self.youtube.videos().list(
-                    part='snippet,player',
-                    id=video_id
-                )
-                video_response = safe_api_call(video_request)
-                
-                if video_response.get('items'):
-                    video_data = video_response['items'][0]['snippet']
-                    # Get best available thumbnail
-                    thumbnails = video_data['thumbnails']
-                    thumbnail_url = None
-                    # Try thumbnails in order of quality
-                    for quality in ['maxresdefault', 'high', 'medium', 'default']:
-                        if quality in thumbnails:
-                            thumbnail_url = thumbnails[quality]['url']
-                            break
-                    
-                    video_info = {
-                        'id': video_id,
-                        'title': video_data['title'],
-                        'description': video_data['description'],
-                        'thumbnail': thumbnail_url or '',  # Use empty string if no thumbnail found
-                        'channel_name': video_data['channelTitle'],
-                        'channel_url': f"https://www.youtube.com/channel/{video_data['channelId']}"
-                    }
-                    self.cache.set(f"latest_video_{channel_id}", video_info)
-                    return video_info
-            return None
-            
+            pl_response = safe_api_call(pl_request)
+
+            if not pl_response.get('items'):
+                return None
+
+            item = pl_response['items'][0]
+            video_id = (
+                item.get('contentDetails', {}).get('videoId')
+                or item.get('snippet', {}).get('resourceId', {}).get('videoId')
+            )
+            if not video_id:
+                return None
+
+            await self.rate_limiter.wait_if_needed()
+            video_request = self.youtube.videos().list(
+                part='snippet,player',
+                id=video_id
+            )
+            video_response = safe_api_call(video_request)
+
+            if not video_response.get('items'):
+                return None
+
+            video_data = video_response['items'][0]['snippet']
+            thumbnails = video_data['thumbnails']
+            thumbnail_url = None
+            for quality in ['maxresdefault', 'high', 'medium', 'default']:
+                if quality in thumbnails:
+                    thumbnail_url = thumbnails[quality]['url']
+                    break
+
+            published_raw = video_data.get('publishedAt') or ''
+            if published_raw.endswith('Z'):
+                published_iso = published_raw.replace('Z', '+00:00')
+            else:
+                published_iso = published_raw
+            try:
+                published_at = datetime.fromisoformat(published_iso)
+                if published_at.tzinfo is None:
+                    published_at = published_at.replace(tzinfo=timezone.utc)
+            except ValueError:
+                published_at = None
+
+            video_info = {
+                'id': video_id,
+                'title': video_data['title'],
+                'description': video_data['description'],
+                'thumbnail': thumbnail_url or '',
+                'channel_name': video_data['channelTitle'],
+                'channel_url': f"https://www.youtube.com/channel/{video_data['channelId']}",
+                'published_at': published_at,
+                'published_at_iso': published_raw,
+            }
+            if use_cache:
+                self.cache.set(cache_key, video_info)
+            return video_info
+
         except Exception as e:
             self.bot.logger.error(f"Error fetching latest video: {str(e)}")
             return None
@@ -164,9 +225,16 @@ class YouTubeNotifications(commands.Cog):
             
             self.cursor.execute('''
                 INSERT INTO youtube_subscriptions 
-                (guild_id, youtube_channel_id, discord_channel_id, last_video_id, ping_role_id)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (ctx.guild.id, channel_id, dc_channel.id, latest_video['id'], ping_role.id if ping_role else None))
+                (guild_id, youtube_channel_id, discord_channel_id, last_video_id, ping_role_id, last_video_published_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                ctx.guild.id,
+                channel_id,
+                dc_channel.id,
+                latest_video['id'] if latest_video else None,
+                ping_role.id if ping_role else None,
+                (latest_video.get('published_at_iso') or '') if latest_video else None,
+            ))
             self.db.commit()
             
             self.cache.add_channel_subscriber(channel_id, ctx.guild.id)
@@ -318,36 +386,56 @@ class YouTubeNotifications(commands.Cog):
 
         for (channel_id,) in unique_channels:
             try:
-                video_info = await self.fetch_latest_video(channel_id)
+                video_info = await self.fetch_latest_video(channel_id, use_cache=False)
                 if not video_info:
                     continue
 
                 self.cursor.execute('''
-                    SELECT guild_id, discord_channel_id, last_video_id, ping_role_id
+                    SELECT guild_id, discord_channel_id, last_video_id, ping_role_id, last_video_published_at
                     FROM youtube_subscriptions 
                     WHERE youtube_channel_id = ?
                 ''', (channel_id,))
                 subscriptions = self.cursor.fetchall()
 
-                for guild_id, discord_channel_id, last_video_id, ping_role_id in subscriptions:
-                    if video_info['id'] != last_video_id:
-                        channel = self.bot.get_channel(discord_channel_id)
-                        if channel:
-                            video_url = f"https://www.youtube.com/watch?v={video_info['id']}"
-                            message_content = f"### {video_info['title']}\n{video_url}"
-                            
-                            # Add role mention if configured
-                            if ping_role_id:
-                                message_content = f"||<@&{ping_role_id}>||\n{message_content}"
-                            
-                            await channel.send(content=message_content)
-                            
-                            self.cursor.execute('''
-                                UPDATE youtube_subscriptions 
-                                SET last_video_id = ?, notification_count = notification_count + 1 
-                                WHERE guild_id = ? AND youtube_channel_id = ?
-                            ''', (video_info['id'], guild_id, channel_id))
-                            self.db.commit()
+                for row in subscriptions:
+                    guild_id, discord_channel_id, last_video_id, ping_role_id, last_pub_db = row
+                    if video_info['id'] == last_video_id:
+                        continue
+                    if last_pub_db and video_info.get('published_at'):
+                        try:
+                            last_dt = datetime.fromisoformat(
+                                last_pub_db.replace('Z', '+00:00')
+                                if last_pub_db.endswith('Z')
+                                else last_pub_db
+                            )
+                            if last_dt.tzinfo is None:
+                                last_dt = last_dt.replace(tzinfo=timezone.utc)
+                            if video_info['published_at'] <= last_dt:
+                                continue
+                        except ValueError:
+                            pass
+
+                    channel = self.bot.get_channel(discord_channel_id)
+                    if not channel:
+                        continue
+
+                    video_url = f"https://www.youtube.com/watch?v={video_info['id']}"
+                    message_content = f"### {video_info['title']}\n{video_url}"
+
+                    if ping_role_id:
+                        message_content = f"||<@&{ping_role_id}>||\n{message_content}"
+
+                    await channel.send(content=message_content)
+
+                    pub_iso = video_info.get('published_at_iso') or ''
+                    self.cursor.execute('''
+                        UPDATE youtube_subscriptions SET
+                            last_video_id = ?,
+                            last_video_published_at = ?,
+                            notification_count = notification_count + 1
+                        WHERE guild_id = ? AND youtube_channel_id = ?
+                    ''', (video_info['id'], pub_iso, guild_id, channel_id))
+                    self.db.commit()
 
             except Exception as e:
                 self.logger.error(f"Error checking videos: {str(e)}")

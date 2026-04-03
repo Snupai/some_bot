@@ -91,6 +91,13 @@ class RSSFeed(commands.Cog):
     
     def get_hash(self, string: str):
         return hashlib.md5(string.encode()).hexdigest()
+
+    def entry_stable_id(self, entry) -> str:
+        """Prefer permanent link over guid (feeds sometimes change guid between polls)."""
+        link = getattr(entry, 'link', None) or ''
+        guid = getattr(entry, 'id', None) or getattr(entry, 'guid', None) or ''
+        raw = link.strip() or str(guid).strip() or (getattr(entry, 'title', None) or '')
+        return self.get_hash(raw)
         
     def get_connection(self):
         conn = sqlite3.connect(self.db_path)
@@ -331,7 +338,7 @@ class RSSFeed(commands.Cog):
             for entry in feedparser_data.entries:
                 self.logger.debug(f"Processing entry: {entry.title}")
                 # 3. Save the entry to RssMessage
-                message_id = self.get_hash(str(entry.get('guid', entry.link)))
+                message_id = self.entry_stable_id(entry)
                 cursor.execute('SELECT * FROM RssMessage WHERE id = ?', (message_id,))
                 if cursor.fetchone() is None:
                     self.logger.debug(f"New entry found: {entry.title} (ID: {message_id})")
@@ -353,56 +360,73 @@ class RSSFeed(commands.Cog):
     
                     for sub_id, _, guild_channel_id, name in subscriptions:
                         self.logger.debug(f"Processing subscription {sub_id} for guild_channel_id {guild_channel_id}")
-                        cursor.execute('SELECT * FROM FeedForwards WHERE subscription_id = ? AND message_id = ?', (sub_id, message_id)) # check if the message has already been forwarded
-                        if cursor.fetchone() is None: # if not, send the embed
-                            self.logger.debug(f"Forwarding new entry '{entry.title}' to subscription {sub_id}")
-                            # 5. Send embed to the channel and add to FeedForwards table
-                            # get the guild and channel id from the guild_channel_id
-                            cursor.execute('SELECT discord_guild_id, discord_channel_id FROM GuildChannel WHERE id = ?', (guild_channel_id,))
-                            result = cursor.fetchone()
-                            if not result:
-                                self.logger.error(f"No GuildChannel found with id '{guild_channel_id}'")
-                                continue
-                            guild_id, channel_id = result
-                            self.logger.debug(f"Fetched guild_id: {guild_id}, channel_id: {channel_id}")
-                            
-                            guild = self.bot.get_guild(int(guild_id))
-                            if not guild:
-                                self.logger.error(f"Guild with ID {guild_id} not found.")
-                                continue
-                            
-                            channel = guild.get_channel(int(channel_id))
-                            if not channel:
-                                self.logger.error(f"Channel with ID {channel_id} not found in guild {guild_id}.")
-                                continue
-                            
-                            title = entry.title
-                            if self.is_spiegel_plus(entry.link):
-                                title = f"(S+) {title}"
-                            
-                            # send the embed of the message to the channel
-                            embed = discord.Embed(title=title, url=entry.link, description=entry.description)
-                            if hasattr(entry, 'enclosures') and entry.enclosures:
-                                embed.set_image(url=entry.enclosures[0].get('href', ''))
-                            if hasattr(entry, 'category'):
-                                embed.add_field(name="Category", value=entry.category, inline=True)
-                            if hasattr(entry, 'published'):
-                                embed.add_field(name="Published Date", value=entry.published, inline=True)
-                            if self.is_spiegel_plus(entry.link):
-                                embed.add_field(name="RemovePaywall", value=f"[Try it out!](https://www.removepaywall.com/search?url={entry.link})", inline=False)
-                            embed.set_footer(text=f"Feed: {name}")
-                            
-                            try:
-                                await channel.send(embed=embed)
-                                self.logger.debug(f"Sent embed for '{entry.title}' to channel {channel_id}")
-                            except Exception as e:
-                                self.logger.error(f"Failed to send embed to channel {channel_id}: {e}")
-                                continue
-    
-                            # save the new forward
-                            cursor.execute('INSERT INTO FeedForwards (subscription_id, message_id) VALUES (?, ?)', (sub_id, message_id))
+                        cursor.execute(
+                            'INSERT OR IGNORE INTO FeedForwards (subscription_id, message_id) VALUES (?, ?)',
+                            (sub_id, message_id)
+                        )
+                        if cursor.rowcount == 0:
+                            continue
+                        conn.commit()
+                        self.logger.debug(f"Forwarding new entry '{entry.title}' to subscription {sub_id}")
+                        cursor.execute('SELECT discord_guild_id, discord_channel_id FROM GuildChannel WHERE id = ?', (guild_channel_id,))
+                        result = cursor.fetchone()
+                        if not result:
+                            self.logger.error(f"No GuildChannel found with id '{guild_channel_id}'")
+                            cursor.execute(
+                                'DELETE FROM FeedForwards WHERE subscription_id = ? AND message_id = ?',
+                                (sub_id, message_id)
+                            )
                             conn.commit()
-                            self.logger.debug(f"Recorded feed forward for message_id {message_id} and subscription_id {sub_id}")
+                            continue
+                        guild_id, channel_id = result
+                        self.logger.debug(f"Fetched guild_id: {guild_id}, channel_id: {channel_id}")
+
+                        guild = self.bot.get_guild(int(guild_id))
+                        if not guild:
+                            self.logger.error(f"Guild with ID {guild_id} not found.")
+                            cursor.execute(
+                                'DELETE FROM FeedForwards WHERE subscription_id = ? AND message_id = ?',
+                                (sub_id, message_id)
+                            )
+                            conn.commit()
+                            continue
+
+                        channel = guild.get_channel(int(channel_id))
+                        if not channel:
+                            self.logger.error(f"Channel with ID {channel_id} not found in guild {guild_id}.")
+                            cursor.execute(
+                                'DELETE FROM FeedForwards WHERE subscription_id = ? AND message_id = ?',
+                                (sub_id, message_id)
+                            )
+                            conn.commit()
+                            continue
+
+                        title = entry.title
+                        if self.is_spiegel_plus(entry.link):
+                            title = f"(S+) {title}"
+
+                        embed = discord.Embed(title=title, url=entry.link, description=entry.description)
+                        if hasattr(entry, 'enclosures') and entry.enclosures:
+                            embed.set_image(url=entry.enclosures[0].get('href', ''))
+                        if hasattr(entry, 'category'):
+                            embed.add_field(name="Category", value=entry.category, inline=True)
+                        if hasattr(entry, 'published'):
+                            embed.add_field(name="Published Date", value=entry.published, inline=True)
+                        if self.is_spiegel_plus(entry.link):
+                            embed.add_field(name="RemovePaywall", value=f"[Try it out!](https://www.removepaywall.com/search?url={entry.link})", inline=False)
+                        embed.set_footer(text=f"Feed: {name}")
+
+                        try:
+                            await channel.send(embed=embed)
+                            self.logger.debug(f"Sent embed for '{entry.title}' to channel {channel_id}")
+                        except Exception as e:
+                            self.logger.error(f"Failed to send embed to channel {channel_id}: {e}")
+                            cursor.execute(
+                                'DELETE FROM FeedForwards WHERE subscription_id = ? AND message_id = ?',
+                                (sub_id, message_id)
+                            )
+                            conn.commit()
+                            continue
         conn.commit()
         conn.close()
         self.logger.debug("Feed check loop completed.")

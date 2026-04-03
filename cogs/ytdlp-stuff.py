@@ -10,6 +10,8 @@ from pathlib import Path
 import uuid
 import validators
 import os
+import tempfile
+import re
 import yt_dlp as youtube_dl
 import spotipy
 from pydub import AudioSegment
@@ -17,6 +19,41 @@ import base64
 import sqlite3
 
 COOKIES_FILE = 'cookies.txt'
+
+
+def _cookiefile_opts():
+    path = Path(COOKIES_FILE)
+    if path.is_file():
+        return {'cookiefile': str(path.resolve())}
+    return {}
+
+
+def _base_ydl_opts():
+    return {
+        **_cookiefile_opts(),
+        'quiet': True,
+        'no_warnings': True,
+        'nocheckcertificate': True,
+        'no_color': True,
+        'socket_timeout': 30,
+        'retries': 3,
+        'fragment_retries': 5,
+        'file_access_retries': 3,
+        'extractor_retries': 3,
+        'http_headers': {
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            ),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-us,en;q=0.5',
+        },
+    }
+
+
+def _sanitize_title_for_fs(title: str) -> str:
+    base = re.sub(r'[^\w\s-]', '', title)[:80]
+    return re.sub(r'[-\s]+', '-', base).strip('-') or 'audio'
 
 class YoutubeDLPCog(commands.Cog):
     def __init__(self, bot):
@@ -54,7 +91,12 @@ class YoutubeDLPCog(commands.Cog):
         if not await self.validate_url(ctx, url):
             return
 
-        url = await self.handle_spotify_url(url)
+        try:
+            url = await self.handle_spotify_url(url)
+        except Exception as e:
+            self.logger.error(f"Error resolving Spotify or search URL: {e}")
+            await ctx.respond(content=f"Could not resolve that link: {e}", ephemeral=True)
+            return
 
         info = await self.extract_info(ctx, url)
         if not info:
@@ -64,13 +106,15 @@ class YoutubeDLPCog(commands.Cog):
         if not title:
             return
 
-        if not await self.download_audio(ctx, url, title):
-            return
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            if not await self.download_audio(ctx, url, title, work):
+                return
 
-        if not await self.trim_audio(ctx, title, begin, end):
-            return
+            if not await self.trim_audio(ctx, title, begin, end, work):
+                return
 
-        await self.send_audio(ctx, title)
+            await self.send_audio(ctx, title, work)
 
     async def validate_url(self, ctx, url):
         try:
@@ -107,15 +151,14 @@ class YoutubeDLPCog(commands.Cog):
                 self.logger.info(f"Generated search query: {search_query}")
                 
                 ydl_opts = {
+                    **_base_ydl_opts(),
                     'default_search': 'ytsearch',
-                    'quiet': False,
-                    'cookiefile': COOKIES_FILE,
                     'format': 'bestaudio/best',
                     'extract_audio': True,
                     'audio_format': 'opus',
                     'audio_quality': 192,
                 }
-                
+
                 with youtube_dl.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(search_query, download=False)
                     if not info or 'entries' not in info or not info['entries']:
@@ -138,21 +181,9 @@ class YoutubeDLPCog(commands.Cog):
             return None
 
         ydl = youtube_dl.YoutubeDL({
-            'cookiefile': COOKIES_FILE,
-            'quiet': False,  # Enable logging
-            'no_warnings': False,  # Show warnings
-            'extract_flat': False,  # Get full info
-            'nocheckcertificate': True,
+            **_base_ydl_opts(),
+            'extract_flat': False,
             'ignoreerrors': False,
-            'logtostderr': True,  # Enable stderr logging
-            'no_color': True,
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'socket_timeout': 30,
-            'retries': 3,
-            'fragment_retries': 3,
-            'file_access_retries': 3,
-            'extractor_retries': 3,
-            # Remove format restrictions for initial extraction
         })
         
         try:
@@ -179,10 +210,10 @@ class YoutubeDLPCog(commands.Cog):
     async def prepare_download(self, ctx, info, begin, end):
         if end is None:
             end = info['duration']
-        title = str(info['title'])  # Fixed syntax for type conversion
-        self.logger.debug(f"Type of title before modification: {type(title)}")
+        raw_title = str(info['title'])
+        self.logger.debug(f"Type of title before modification: {type(raw_title)}")
 
-        title += f"_{uuid.uuid4()}"
+        title = f"{_sanitize_title_for_fs(raw_title)}_{uuid.uuid4()}"
 
         try:
             begin = float(begin)
@@ -209,44 +240,37 @@ class YoutubeDLPCog(commands.Cog):
 
         return title, begin, end
 
-    async def download_audio(self, ctx, url, title):
+    async def download_audio(self, ctx, url, title, work_dir: Path):
+        out_base = work_dir / title
         ydl_opts = {
-            'format': 'bestaudio[ext=m4a]/bestaudio/best',  # More flexible format selection
-            'outtmpl': f'{title}.%(ext)s',
+            **_base_ydl_opts(),
+            'format': 'bestaudio/best',
+            'outtmpl': str(out_base) + '.%(ext)s',
             'restrictfilenames': True,
             'noplaylist': True,
-            'quiet': False,  # Enable logging for debugging
-            'no_warnings': False,
             'nooverwrites': True,
-            'cookiefile': COOKIES_FILE,
-            'socket_timeout': 30,
-            'retries': 3,
-            'fragment_retries': 3,
-            'file_access_retries': 3,
-            'extractor_retries': 3,
-            'ignoreerrors': True,
+            'ignoreerrors': False,
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'opus',
                 'preferredquality': '192',
             }],
-            'verbose': True,  # Add verbose output for debugging
         }
         loop = asyncio.get_event_loop()
         with youtube_dl.YoutubeDL(ydl_opts) as ydl:
             try:
                 self.logger.info(f"Starting download for URL: {url}")
                 await loop.run_in_executor(None, lambda: ydl.download([url]))
-                
-                # Check if the file was actually created
-                if not os.path.exists(f'{title}.opus'):
-                    self.logger.error(f"Download completed but file {title}.opus not found")
+
+                opus_path = out_base.with_suffix('.opus')
+                if not opus_path.is_file():
+                    self.logger.error(f"Download completed but file {opus_path} not found")
                     await ctx.respond(content="Failed to download the audio file. Please try again.", ephemeral=True)
                     return False
-                    
-                self.logger.info(f"Successfully downloaded and converted audio to {title}.opus")
+
+                self.logger.info(f"Successfully downloaded and converted audio to {opus_path}")
                 return True
-                
+
             except youtube_dl.DownloadError as e:
                 self.logger.error(f"DownloadError during download: {str(e)}")
                 await ctx.respond(content=f"Error downloading the audio file: {str(e)}", ephemeral=True)
@@ -256,13 +280,19 @@ class YoutubeDLPCog(commands.Cog):
                 await ctx.respond(content=f"Unexpected error while downloading: {str(e)}", ephemeral=True)
                 return False
 
-    async def trim_audio(self, ctx, title, begin, end):
+    async def trim_audio(self, ctx, title, begin, end, work_dir: Path):
         try:
-            if not os.path.exists(f'{title}.opus'):
+            opus_path = work_dir / f'{title}.opus'
+            ogg_path = work_dir / f'{title}.ogg'
+            if not opus_path.is_file():
                 await ctx.respond(content="The downloaded audio file is missing. Please try again.", ephemeral=True)
                 return False
 
-            ffmpeg_cmd = ['ffmpeg', '-i', f'{title}.opus', '-ab', '189k', '-ss', str(begin), '-t', str(end - begin), '-acodec', 'libopus', f'{title}.ogg']
+            ffmpeg_cmd = [
+                'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                '-i', str(opus_path), '-ab', '189k', '-ss', str(begin), '-t', str(end - begin),
+                '-acodec', 'libopus', str(ogg_path),
+            ]
             process = await asyncio.create_subprocess_exec(*ffmpeg_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             stdout, stderr = await process.communicate()
 
@@ -271,7 +301,7 @@ class YoutubeDLPCog(commands.Cog):
                 await ctx.respond(content=f"Error trimming the audio file: {error_msg}", ephemeral=True)
                 return False
 
-            if not os.path.exists(f'{title}.ogg'):
+            if not ogg_path.is_file():
                 await ctx.respond(content="Failed to create the trimmed audio file. Please try again.", ephemeral=True)
                 return False
 
@@ -280,23 +310,23 @@ class YoutubeDLPCog(commands.Cog):
             await ctx.respond(content=f"Unexpected error while trimming audio: {str(e)}", ephemeral=True)
             return False
 
-    async def send_audio(self, ctx, title):
+    async def send_audio(self, ctx, title, work_dir: Path):
         try:
-            filepath = f'{title}.ogg'
+            filepath = work_dir / f'{title}.ogg'
             self.logger.debug(f"Calculated title: {title}")
-            
-            if not os.path.exists(filepath):
+
+            if not filepath.is_file():
                 await ctx.respond(content="Error finding the audio file.", ephemeral=True)
                 return
 
             # Check file size
-            file_size = os.path.getsize(filepath)
+            file_size = filepath.stat().st_size
             if file_size > 25 * 1024 * 1024:  # 25MB limit
                 await ctx.respond(content="The audio file is too large to send. Please try a shorter clip.", ephemeral=True)
                 return
 
             # Step 2: Send the message with the uploaded file
-            audio = AudioSegment.from_ogg(filepath)
+            audio = AudioSegment.from_ogg(str(filepath))
             duration_secs = round(len(audio) / 1000.0, 2)
 
             samples = audio.get_array_of_samples()
@@ -307,7 +337,7 @@ class YoutubeDLPCog(commands.Cog):
             waveform = waveform[:100]
             waveform_data = base64.b64encode(bytes(waveform)).decode('utf-8')
             
-            await ctx.respond(file=discord.VoiceMessage(f'{title}.ogg', waveform=waveform_data, duration_secs=duration_secs, filename="voice-message.ogg", description="some song idk"))
+            await ctx.respond(file=discord.VoiceMessage(str(filepath), waveform=waveform_data, duration_secs=duration_secs, filename="voice-message.ogg", description="some song idk"))
             # send another message stating the title of the song above
             title_msg = title.split("_")[:-1]
             title_msg = "_".join(title_msg)
@@ -315,10 +345,9 @@ class YoutubeDLPCog(commands.Cog):
         except Exception as e:
             await ctx.respond(content=f"Error sending the audio file: {str(e)}", ephemeral=True)
         finally:
-            # Clean up files
             for extension in ['.opus', '.ogg']:
                 try:
-                    audio_file = Path(f'{title}{extension}')
+                    audio_file = work_dir / f'{title}{extension}'
                     if audio_file.is_file():
                         audio_file.unlink()
                 except Exception as e:
