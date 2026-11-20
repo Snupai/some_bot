@@ -178,7 +178,9 @@ class TaskManager:
         # Taking the task lock waits out an in-flight launch, so a returned thread is interrupted too.
         async with self._lock(rec.id):
             rec = self.store.get(rec.id) or rec
-            if rec.thread_id and self.t3 is not None and rec.active:
+            if not rec.active:
+                return rec  # already finished: keep its real outcome
+            if rec.thread_id and self.t3 is not None:
                 await self.t3.interrupt(rec.thread_id, rec.run_id, reason, client_request_id=f"{rec.id}-cancel")
             rec = self.store.update(rec.id, status="cancelled", error=reason)  # type: ignore[assignment]
         mon = self._monitors.pop(rec.id, None)

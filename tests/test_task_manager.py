@@ -423,3 +423,14 @@ async def test_close_does_not_hang_on_stalled_notification(store):
     await tm.submit(rec())
     await entered.wait()
     await asyncio.wait_for(tm.close(), 8)
+
+
+async def test_cancel_does_not_overwrite_finished_task(store):
+    t3 = FakeT3Client()
+    tm, events = await make(store, t3)
+    r = await tm.submit(rec())
+    await eventually(lambda: store.get(r.id).status == "completed")
+    out = await tm.cancel(store.get(r.id))
+    assert out.status == "completed" and store.get(r.id).status == "completed"
+    assert t3.interrupts == [] and (r.short_id, "cancelled") not in events
+    await tm.close()

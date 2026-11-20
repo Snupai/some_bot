@@ -256,7 +256,7 @@ All variables, with defaults, are in [`.env.example`](../.env.example). The most
 
 ```bash
 uv sync                       # includes the dev group (pytest)
-uv run pytest                 # 105 tests, ~25 s
+uv run pytest                 # 106 tests, ~25 s
 (cd bridge && npm test)       # bridge unit tests
 ```
 
@@ -288,15 +288,26 @@ What is covered without real credentials:
   adapter, playback before ready, leave.
 - All existing cogs still load next to the two new ones, with no slash-command name collisions.
 
-**Not tested here** (needs real Discord/OpenAI/T3 access and should be checked once on the real server):
+**Live-verified on 2026-11-20 with real credentials:**
 
-- An actual Discord voice connection (UDP, DAVE handshake) and real audio receive/playback through
-  `@discordjs/voice`.
-- A real GPT-Live session: audio quality, latency, interruption behaviour, the exact delegation timing on the
-  session clock, and the backend model name `gpt-5.6-luna`. The protocol follows OpenAI's docs and the
-  `openai` 3.57 SDK types.
-- A real T3 OAuth approval in the browser, and the exact JSON returned by `t3_thread_launch`, which is parsed
-  defensively. `t3_thread_wait`, `t3_thread_read` and `t3_project_list` were checked against a live T3 server.
+- **GPT-Live 1.1:** the session starts in about 1.7 s with the full Nyanjou config (strict tool schemas, backend
+  `gpt-5.6-luna`, web search), with no errors, and Nyanjou speaks. TTS-generated user speech is streamed as input:
+  delegation → `t3_list_tasks` / `t3_start_task` call → output → spoken answer. `session.delegation.created.offset_ms`
+  (6200 ms) matches the bot's own session clock (speech at 500–6100 ms), which confirms the basis of speaker
+  attribution. The model fills `t3_start_task` with a complete, self-contained brief (`new_project: true`,
+  `risk_level: normal`).
+- **T3 Code over MCP:** DCR, PKCE and token exchange, with approval on T3's own consent page using a
+  `t3 auth pairing create` code; the token is stored with mode 0600. Then `t3_thread_launch` → `t3_thread_wait` →
+  `t3_thread_read` returned the expected reply, a follow-up via `t3_thread_send` was attributed to the new run, and
+  `t3_thread_interrupt` returned `interrupt_requested`.
+
+**Not tested here** (needs a real Discord voice channel with people in it): the actual Discord voice connection
+(UDP, DAVE handshake) and real audio receive and playback through `@discordjs/voice`.
+
+**T3 Connect note:** when `T3_MCP_URL` points at the T3 Connect relay, approval happens on the hosted app
+(`app.t3.codes`) and needs a sign-in with the linked T3 account. If the bot runs on the same machine as T3, use
+`http://127.0.0.1:3773/mcp` and approve on the environment's own page. A browser on another device can't complete
+a `127.0.0.1` sign-in ("unknown app"); use the relay URL with `--paste` for that case.
 
 ## Troubleshooting
 
