@@ -111,7 +111,10 @@ class VoiceSession:
         # Serializes Live client replacement (/voice, /model) with start and teardown.
         self._live_lock = asyncio.Lock()
         self._teardown: asyncio.Task | None = None
-        self._playback_idle_at: deque[int] = deque(maxlen=64)  # Live clock when Nyanjou stopped speaking
+        # Completed (not flushed) utterances of Nyanjou in the current Live session: (start_ms, end_ms).
+        self._utterances: deque[tuple[int, int]] = deque(maxlen=64)
+        self._utterance_start: int | None = None
+        self._utterance_flushed = False
         # Everyone whose audio reached GPT-Live while this conversation's history exists. Kept across
         # Live reconnects and restarts (history is carried over); never reset during the session.
         self._contributors: set[int] = set()
@@ -254,7 +257,10 @@ class VoiceSession:
             self.voice_state = msg.get("state")
         elif op == "playback_idle":
             self.playing = False
-            self._playback_idle_at.append(self.clock_ms)
+            if self._utterance_start is not None and not self._utterance_flushed:
+                self._utterances.append((self._utterance_start, self.clock_ms))
+            self._utterance_start = None
+            self._utterance_flushed = False
         elif op == "speaking_end":
             pass
         elif op in {"left", "bridge_lost"} and not self.closed:
@@ -324,6 +330,7 @@ class VoiceSession:
             await asyncio.sleep(max(0.0, delay))
 
     def _barge_in(self) -> None:
+        self._utterance_flushed = True  # an interrupted utterance never counts as "question played"
         self.stats.barge_ins += 1
         self._suppress_output = True
         self.playing = False
@@ -359,6 +366,8 @@ class VoiceSession:
         pcm48 = self.to_discord.convert(pcm24)
         if not pcm48:
             return
+        if not self.playing and self._utterance_start is None:
+            self._utterance_start = self.clock_ms
         self.playing = True
         self.stats.audio_out_bytes += len(pcm48)
         try:
@@ -378,6 +387,9 @@ class VoiceSession:
             log.debug("guild %s heard [%d-%d]: %s", self.guild_id, start_ms, end_ms, text)
 
     def _on_live_started(self, session_id: str) -> None:
+        self._utterances.clear()  # markers belong to the old session clock
+        self._utterance_start = None
+        self._utterance_flushed = False
         # New session -> new clock. Old attributions are meaningless now.
         self.clock_ms = 0
         self.timeline.reset()
@@ -409,8 +421,9 @@ class VoiceSession:
         return Attribution(None, "unknown_delegation")
 
     def playback_idle_after(self, t_ms: int) -> int | None:
-        """First time after ``t_ms`` at which Nyanjou finished speaking (e.g. a confirmation question)."""
-        return next((t for t in self._playback_idle_at if t > t_ms), None)
+        """End of Nyanjou's first fully played utterance that *started* after ``t_ms`` (for a
+        confirmation: the spoken question). Flushed utterances and earlier sessions never count."""
+        return next((end for start, end in self._utterances if start > t_ms), None)
 
     async def _on_function_call(self, call: FunctionCall) -> str:
         self.stats.tool_calls += 1

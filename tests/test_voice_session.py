@@ -382,9 +382,32 @@ async def test_cancelled_stop_caller_does_not_abandon_teardown(setup):
     await s.stop("again")  # later calls await the same finished teardown
 
 
-async def test_playback_idle_marks_question_end(setup):
+async def test_question_marker_requires_completed_utterance_in_session(setup):
     _, d = setup
     s, _ = make_session(d)
+    await s.start()
+    pcm = b"\x00\x10" * 480
+    # An utterance that started before the question was asked doesn't count.
+    s.clock_ms = 1000
+    s._on_live_audio(pcm)
+    s.clock_ms = 2000
+    s.on_bridge_event({"op": "playback_idle"})
+    assert s.playback_idle_after(1500) is None
+    # The question starts after t=2500 and is interrupted (barge-in) -> doesn't count.
+    s.clock_ms = 3000
+    s._on_live_audio(pcm)
+    s._barge_in()
+    s.clock_ms = 3500
+    s.on_bridge_event({"op": "playback_idle"})
+    assert s.playback_idle_after(2500) is None
+    # Asked again, fully played -> counts.
+    s._suppress_output = False
+    s.clock_ms = 4000
+    s._on_live_audio(pcm)
     s.clock_ms = 5000
-    s.on_bridge_event({"op": "playback_idle", "guildId": "10"})
-    assert s.playback_idle_after(4000) == 5000 and s.playback_idle_after(5000) is None
+    s.on_bridge_event({"op": "playback_idle"})
+    assert s.playback_idle_after(2500) == 5000
+    # A new Live session (clock reset) invalidates all markers.
+    s._on_live_started("s2")
+    assert s.playback_idle_after(-1) is None
+    await s.stop()

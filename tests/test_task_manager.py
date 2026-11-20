@@ -350,16 +350,19 @@ async def test_timeout_listener_can_reopen_task(store):
     await tm.close()
 
 
-async def test_late_waiting_from_old_run_is_ignored(store):
+@pytest.mark.parametrize("with_run_id", [True, False])
+async def test_late_waiting_from_old_run_is_ignored(store, with_run_id):
     class LateT3(FakeT3Client):
         async def wait(self, thread_id, run_id, timeout_ms):
             if self.gate is not None and not self.gate.is_set():
                 old = self.threads[thread_id]["run"]
                 await self.gate.wait()
-                return {"threadId": thread_id, "runId": old, "status": "waiting", "timedOut": True}
+                return {"threadId": thread_id, "runId": old if self.with_run_id else None, "status": "waiting",
+                        "timedOut": True}
             return await super().wait(thread_id, run_id, timeout_ms)
 
     t3 = LateT3()
+    t3.with_run_id = with_run_id
     t3.gate = asyncio.Event()
     tm, events = await make(store, t3)
     r = await tm.submit(rec())
@@ -403,3 +406,20 @@ async def test_close_waits_for_final_notification(store):
     await entered.wait()
     await tm.close()
     assert finished == [r.id]
+
+
+async def test_close_does_not_hang_on_stalled_notification(store):
+    t3 = FakeT3Client()
+    tm = TaskManager(store, t3, wait_slice_ms=10)
+    entered = asyncio.Event()
+
+    async def stuck_listener(r, kind):
+        if kind == "completed":
+            entered.set()
+            await asyncio.Event().wait()  # never returns
+
+    tm.add_listener(stuck_listener)
+    await tm.start()
+    await tm.submit(rec())
+    await entered.wait()
+    await asyncio.wait_for(tm.close(), 8)

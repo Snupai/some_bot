@@ -85,7 +85,9 @@ class TaskManager:
             t.cancel()
         # Let retiring monitors finish their final notification (e.g. recording delivery) first.
         if self._retiring:
-            await asyncio.wait(list(self._retiring), timeout=5)
+            _, pending = await asyncio.wait(list(self._retiring), timeout=5)
+            for t in pending:  # a stalled notification must not block shutdown
+                t.cancel()
         await asyncio.gather(*self._workers, *self._monitors.values(), *self._retiring, return_exceptions=True)
         self._retiring.clear()
         self._workers.clear()
@@ -314,8 +316,9 @@ class TaskManager:
                 self._retire(task_id, slot)
                 await self._emit(rec, "timed_out")
                 return
+            waited_run = rec.run_id
             try:
-                res = await self.t3.wait(rec.thread_id, rec.run_id, self.wait_slice_ms)
+                res = await self.t3.wait(rec.thread_id, waited_run, self.wait_slice_ms)
                 errors = 0
             except asyncio.CancelledError:
                 raise
@@ -337,7 +340,8 @@ class TaskManager:
                 current = self.store.get(task_id)
                 if current is None or not current.active:
                     return
-                if current.run_id and res.get("runId") and current.run_id != res.get("runId"):
+                if current.run_id != waited_run or (
+                        current.run_id and res.get("runId") and current.run_id != res.get("runId")):
                     continue  # response for an older run (a follow-up started a newer one): ignore
                 # T3 may report "waiting" (pending approval/input) together with timedOut=true.
                 if status == "waiting":
