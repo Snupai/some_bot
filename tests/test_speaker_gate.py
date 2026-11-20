@@ -80,12 +80,16 @@ def test_floor_quiet_holder_frames_are_attributed():
     assert r.audio is QUIET and not r.speakers and r.sources == {1}
 
 
-def test_speech_between_bounds():
+def test_speech_between_counts_only_voiced_frames():
     tl = SpeakerTimeline()
     for t in range(0, 1000, 20):
         tl.record(t, frozenset({1}))
     assert tl.speech_ms_between(1, 500, 1000) == 480
     assert tl.speech_ms_between(1, 2000, 3000) == 0
+    for t in range(2000, 3000, 20):  # holder forwarded but silent
+        tl.record(t, frozenset({1}), frozenset())
+    assert tl.speech_ms_between(1, 1999, 3000) == 0
+    assert tl.voiced_ms_by_user(2000, 3000) == {1: 1000}  # still attributed as the source
 
 
 def test_mix_mode_does_not_forward_unvoiced_audio():

@@ -110,7 +110,8 @@ class VoiceSession:
         self._auth_cache: dict[int, tuple[bool, float]] = {}
         # Serializes Live client replacement (/voice, /model) with start and teardown.
         self._live_lock = asyncio.Lock()
-        self._stopping = False
+        self._teardown: asyncio.Task | None = None
+        self._playback_idle_at: deque[int] = deque(maxlen=64)  # Live clock when Nyanjou stopped speaking
         # Everyone whose audio reached GPT-Live while this conversation's history exists. Kept across
         # Live reconnects and restarts (history is carried over); never reset during the session.
         self._contributors: set[int] = set()
@@ -171,18 +172,20 @@ class VoiceSession:
         log.info("voice session started in guild %s (model=%s voice=%s)", self.guild_id, self.model, self.voice)
 
     async def stop(self, reason: str = "leave", notify: bool = True) -> None:
-        if self.closed and self._stopping:
-            return
+        # One shared teardown; shielded so a cancelled caller can't abandon it halfway.
         self.closed = True
-        self._stopping = True
+        if self._teardown is None:
+            self._teardown = asyncio.get_running_loop().create_task(self._do_stop(reason, notify))
+        if self._teardown is not asyncio.current_task():
+            await asyncio.shield(self._teardown)
+
+    async def _do_stop(self, reason: str, notify: bool) -> None:
         log.info("stopping voice session in guild %s (%s)", self.guild_id, reason)
         # Waits for an in-flight start() or restart_live() before tearing down.
         async with self._live_lock:
-            current = asyncio.current_task()
-            others = [t for t in self._tasks if t is not current]
-            for t in others:
+            for t in self._tasks:
                 t.cancel()
-            await asyncio.gather(*others, return_exceptions=True)
+            await asyncio.gather(*self._tasks, return_exceptions=True)
             if self.bridge.handlers.get(self.guild_id) is self:
                 del self.bridge.handlers[self.guild_id]
             if self.live is not None:
@@ -251,6 +254,7 @@ class VoiceSession:
             self.voice_state = msg.get("state")
         elif op == "playback_idle":
             self.playing = False
+            self._playback_idle_at.append(self.clock_ms)
         elif op == "speaking_end":
             pass
         elif op in {"left", "bridge_lost"} and not self.closed:
@@ -279,7 +283,7 @@ class VoiceSession:
                 continue
             frames[uid] = (mono, rms_dbfs(mono))
         result = self.gate.process(frames)
-        self.timeline.record(self.clock_ms, result.sources)
+        self.timeline.record(self.clock_ms, result.sources, result.speakers)
         self._contributors |= result.sources
 
         if result.speakers:
@@ -404,6 +408,10 @@ class VoiceSession:
             return self._delegations[delegation_id]
         return Attribution(None, "unknown_delegation")
 
+    def playback_idle_after(self, t_ms: int) -> int | None:
+        """First time after ``t_ms`` at which Nyanjou finished speaking (e.g. a confirmation question)."""
+        return next((t for t in self._playback_idle_at if t > t_ms), None)
+
     async def _on_function_call(self, call: FunctionCall) -> str:
         self.stats.tool_calls += 1
         att = self.attribution_for(call.delegation_id)
@@ -415,6 +423,7 @@ class VoiceSession:
             guild_id=self.guild_id, channel_id=self.text_channel_id, attribution=att, user_display=name,
             delegation_id=call.delegation_id, live_session_id=self.live.session_id if self.live else None,
             now_ms=self.clock_ms, speech_ms_between=self.timeline.speech_ms_between,
+            playback_idle_after=self.playback_idle_after,
         )
         out = await self.dispatcher.dispatch(call.name, call.arguments, ctx)
         if '"ok": false' in out:

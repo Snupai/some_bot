@@ -163,6 +163,8 @@ class ToolContext:
     now_ms: int | None = None  # Live session clock when the tool runs
     # (user_id, start_ms, end_ms) -> ms of forwarded speech by that user in (start, end]
     speech_ms_between: Callable[[int, int, int], int] | None = None
+    # t_ms -> first Live-clock time after t_ms at which Nyanjou finished speaking, or None
+    playback_idle_after: Callable[[int], int | None] | None = None
 
 
 def _out(**kw: Any) -> str:
@@ -272,9 +274,9 @@ class ToolDispatcher:
         """Return the stored args, or an error JSON string.
 
         A confirmation is only valid in the same guild and Live session, from the same speaker, from a
-        *new* delegation made after the confirmation was requested, and only if that speaker said
-        something between the request and that delegation. The backend can't redeem its own
-        confirmation, and speech from before the question doesn't count.
+        *new* delegation, and only if that speaker audibly spoke after Nyanjou finished playing the
+        question and before that delegation. The backend can't redeem its own confirmation; silence
+        and speech from before the question don't count.
         """
         self._prune()
         pending = self._pending.get(conf_id)
@@ -284,11 +286,13 @@ class ToolDispatcher:
                 or pending.guild_id != ctx.guild_id or pending.live_session_id != ctx.live_session_id):
             return invalid
         asked, answered = pending.issued_at_ms, ctx.attribution.offset_ms
+        # Count only audible speech after the question has actually been played to the channel.
+        played = ctx.playback_idle_after(asked) if (ctx.playback_idle_after and asked is not None) else None
         fresh = (
             ctx.delegation_id is not None and ctx.delegation_id != pending.delegation_id
-            and asked is not None and answered is not None and answered > asked
+            and played is not None and answered is not None and answered > played
             and ctx.speech_ms_between is not None
-            and ctx.speech_ms_between(user_id, asked, answered) >= CONFIRMATION_MIN_SPEECH_MS
+            and ctx.speech_ms_between(user_id, played, answered) >= CONFIRMATION_MIN_SPEECH_MS
         )
         if not fresh:
             return _out(ok=False, error="confirmation_not_heard",

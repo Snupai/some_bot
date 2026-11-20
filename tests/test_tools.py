@@ -29,7 +29,7 @@ async def env(tmp_path):
 
 
 def ctx(user=None, reason="single_speaker", guild=10, speakers=None, *, delegation="d1", offset=10_000,
-        others=(), session="s1", spoken_since=None, now=None, speech=None):
+        others=(), session="s1", spoken_since=None, now=None, speech=None, played=None, never_played=False):
     """``spoken_since``: user -> ms of speech in any interval. ``speech``: list of (user, t_ms) ticks."""
     att = Attribution(user, reason if user else (reason if reason != "single_speaker" else "no_speech"),
                       frozenset(speakers or ([user] if user else [])), others_recent=frozenset(others),
@@ -41,9 +41,18 @@ def ctx(user=None, reason="single_speaker", guild=10, speakers=None, *, delegati
             return sum(20 for u, t in speech if u == uid and start < t <= end)
         return spoken.get(uid, 0)
 
+    now_ms = offset + 500 if now is None else now
+
+    def idle_after(t):
+        # By default the question finishes playing 100 ms after it was asked.
+        if never_played:
+            return None
+        at = t + 100 if played is None else played
+        return at if at > t else None
+
     return ToolContext(guild_id=guild, channel_id=5, attribution=att, user_display="tester",
                        delegation_id=delegation, live_session_id=session,
-                       now_ms=offset + 500 if now is None else now, speech_ms_between=between)
+                       now_ms=now_ms, speech_ms_between=between, playback_idle_after=idle_after)
 
 
 START = {"title": "Minecraft-Webseite", "task": "Erstelle eine Webseite für meinen Minecraft-Server mit Next.js",
@@ -249,3 +258,19 @@ async def test_update_confirmation_is_bound_to_resolved_task(env):
     assert r["ok"] and r["task_id"] == 1
     assert "git push -f" in store.get_by_short_id(1).prompt
     assert "git push -f" not in store.get_by_short_id(2).prompt
+
+
+async def test_confirmation_requires_question_played_first(env):
+    d, tm, store = env
+    risky = {**START, "task": "Lösche alle Backups", "risk_level": "high", "risk_reason": "x"}
+    r = await call(d, "t3_start_task", risky, ctx(ALICE, delegation="d1", offset=10_000, now=11_000))
+    cid = r["confirmation_id"]
+    # The question was never played (or only after Alice's speech): no confirmation.
+    r = await call(d, "t3_start_task", {**START, "confirmation_id": cid},
+                   ctx(ALICE, delegation="d2", offset=14_000, never_played=True,
+                       speech=[(ALICE, t) for t in range(12_000, 12_600, 20)]))
+    assert r["error"] == "confirmation_not_heard"
+    r = await call(d, "t3_start_task", {**START, "confirmation_id": cid},
+                   ctx(ALICE, delegation="d2", offset=14_000, played=13_000,
+                       speech=[(ALICE, t) for t in range(12_000, 12_600, 20)]))
+    assert r["error"] == "confirmation_not_heard"

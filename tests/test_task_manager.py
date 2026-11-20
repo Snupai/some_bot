@@ -329,3 +329,77 @@ async def test_recovered_waiting_task_returns_to_running(store):
     tm, _ = await make(store, t3)
     await eventually(lambda: store.get(old.id).status == "running")
     await tm.close()
+
+
+async def test_timeout_listener_can_reopen_task(store):
+    t3 = FakeT3Client(waits_until_done=10_000)
+    tm = TaskManager(store, t3, wait_slice_ms=10, task_timeout_s=0)
+    reopened = []
+
+    async def listener(r, kind):
+        if kind == "timed_out" and not reopened:
+            reopened.append(1)
+            tm.task_timeout_s = 600
+            t3.waits_until_done = 1
+            await tm.update(store.get(r.id), "weiter")
+
+    tm.add_listener(listener)
+    await tm.start()
+    r = await tm.submit(rec())
+    await eventually(lambda: store.get(r.id).result == "updated: weiter")
+    await tm.close()
+
+
+async def test_late_waiting_from_old_run_is_ignored(store):
+    class LateT3(FakeT3Client):
+        async def wait(self, thread_id, run_id, timeout_ms):
+            if self.gate is not None and not self.gate.is_set():
+                old = self.threads[thread_id]["run"]
+                await self.gate.wait()
+                return {"threadId": thread_id, "runId": old, "status": "waiting", "timedOut": True}
+            return await super().wait(thread_id, run_id, timeout_ms)
+
+    t3 = LateT3()
+    t3.gate = asyncio.Event()
+    tm, events = await make(store, t3)
+    r = await tm.submit(rec())
+    await eventually(lambda: store.get(r.id).thread_id is not None)
+    await asyncio.sleep(0.02)
+    await tm.update(store.get(r.id), "neu")
+    t3.gate.set()
+    await eventually(lambda: store.get(r.id).status == "completed")
+    assert (r.short_id, "waiting_input") not in events
+    await tm.close()
+
+
+async def test_cancel_reopened_task_before_monitor_runs_frees_slot(store):
+    t3 = FakeT3Client()
+    tm, _ = await make(store, t3, max_parallel=1)
+    a = await tm.submit(rec(title="A"))
+    await eventually(lambda: store.get(a.id).status == "completed")
+    await tm.update(store.get(a.id), "mehr")  # reserves the only slot for the new monitor
+    await tm.cancel(store.get(a.id))           # before the monitor got to run
+    await asyncio.sleep(0.02)
+    b = await tm.submit(rec(title="B"))
+    await eventually(lambda: store.get(b.id).status == "completed")
+    await tm.close()
+
+
+async def test_close_waits_for_final_notification(store):
+    t3 = FakeT3Client()
+    tm = TaskManager(store, t3, wait_slice_ms=10)
+    finished = []
+    entered = asyncio.Event()
+
+    async def slow_listener(r, kind):
+        if kind == "completed":
+            entered.set()
+            await asyncio.sleep(0.2)
+            finished.append(r.id)
+
+    tm.add_listener(slow_listener)
+    await tm.start()
+    r = await tm.submit(rec())
+    await entered.wait()
+    await tm.close()
+    assert finished == [r.id]

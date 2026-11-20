@@ -105,31 +105,26 @@ class SpeakerTimeline:
 
     def __init__(self, horizon_ms: int = 120_000) -> None:
         self.horizon_ms = horizon_ms
-        self._ticks: deque[tuple[int, frozenset[int]]] = deque()
+        # (t_ms, sources: whose audio was forwarded, voiced: who was audibly speaking)
+        self._ticks: deque[tuple[int, frozenset[int], frozenset[int]]] = deque()
 
     def reset(self) -> None:
         self._ticks.clear()
 
-    def record(self, t_ms: int, speakers: frozenset[int]) -> None:
-        if speakers:
-            self._ticks.append((t_ms, speakers))
+    def record(self, t_ms: int, sources: frozenset[int], voiced: frozenset[int] | None = None) -> None:
+        if sources:
+            self._ticks.append((t_ms, sources, sources if voiced is None else voiced))
         cutoff = t_ms - self.horizon_ms
         while self._ticks and self._ticks[0][0] < cutoff:
             self._ticks.popleft()
 
     def voiced_ms_by_user(self, start_ms: int, end_ms: int) -> dict[int, int]:
         out: dict[int, int] = {}
-        for t, speakers in self._ticks:
+        for t, sources, _ in self._ticks:
             if start_ms <= t <= end_ms:
-                for uid in speakers:
+                for uid in sources:
                     out[uid] = out.get(uid, 0) + FRAME_MS
         return out
-
-    def last_speaker_before(self, t_ms: int) -> int | None:
-        for t, speakers in reversed(self._ticks):
-            if t <= t_ms and len(speakers) == 1:
-                return next(iter(speakers))
-        return None
 
     def attribute(self, offset_ms: int, window_ms: int, tolerance_ms: int) -> Attribution:
         """Exactly one user must be the source of forwarded audio in the window.
@@ -146,5 +141,5 @@ class SpeakerTimeline:
         return Attribution(next(iter(speakers)), "single_speaker", speakers, offset_ms=offset_ms)
 
     def speech_ms_between(self, user_id: int, start_ms: int, end_ms: int) -> int:
-        """Forwarded audio from ``user_id`` with start_ms < t <= end_ms."""
-        return self.voiced_ms_by_user(start_ms + 1, end_ms).get(user_id, 0)
+        """Audible (voiced) speech from ``user_id`` with start_ms < t <= end_ms. Silent frames don't count."""
+        return sum(FRAME_MS for t, _, voiced in self._ticks if start_ms < t <= end_ms and user_id in voiced)

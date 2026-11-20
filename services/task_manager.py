@@ -58,6 +58,7 @@ class TaskManager:
         self._monitors: dict[str, asyncio.Task] = {}
         # Per-task lock: launch, follow-ups, cancel and applying results are serialized per task.
         self._locks: dict[str, asyncio.Lock] = {}
+        self._retiring: set[asyncio.Task] = set()  # monitors finishing their last notification
         self._listeners: list[Listener] = []
         self._started = False
 
@@ -82,7 +83,11 @@ class TaskManager:
     async def close(self) -> None:
         for t in [*self._workers, *self._monitors.values()]:
             t.cancel()
-        await asyncio.gather(*self._workers, *self._monitors.values(), return_exceptions=True)
+        # Let retiring monitors finish their final notification (e.g. recording delivery) first.
+        if self._retiring:
+            await asyncio.wait(list(self._retiring), timeout=5)
+        await asyncio.gather(*self._workers, *self._monitors.values(), *self._retiring, return_exceptions=True)
+        self._retiring.clear()
         self._workers.clear()
         self._monitors.clear()
         self._started = False
@@ -264,91 +269,113 @@ class TaskManager:
             if holds_slot:
                 self._slots.release()  # an existing monitor already accounts for this task
             return
-        task = asyncio.create_task(self._monitor(rec.id, holds_slot), name=f"nyanjou-monitor-{rec.short_id}")
+        # Slot ownership lives outside the coroutine, so a monitor cancelled before it ever ran
+        # (e.g. cancel right after reopening) still returns its slot.
+        slot = {"held": holds_slot}
+        task = asyncio.create_task(self._monitor(rec.id, slot), name=f"nyanjou-monitor-{rec.short_id}")
         self._monitors[rec.id] = task
 
-    async def _monitor(self, task_id: str, holds_slot: bool) -> None:
+        def _release_on_done(_t: asyncio.Task, slot=slot, task_id=rec.id) -> None:
+            if self._monitors.get(task_id) is _t:
+                del self._monitors[task_id]
+            if slot["held"]:
+                slot["held"] = False
+                self._slots.release()
+            self._retiring.discard(_t)
+
+        task.add_done_callback(_release_on_done)
+
+    def _retire(self, task_id: str, slot: dict) -> None:
+        """Stop tracking this monitor as the task's monitor (so a follow-up gets a new one) and free its
+        slot, before awaiting listeners. close() still waits for it via ``_retiring``."""
+        current = asyncio.current_task()
+        if self._monitors.get(task_id) is current:
+            del self._monitors[task_id]
+        if current is not None:
+            self._retiring.add(current)
+        if slot["held"]:
+            slot["held"] = False
+            self._slots.release()
+
+    async def _monitor(self, task_id: str, slot: dict) -> None:
         assert self.t3 is not None
         errors = 0
-        if not holds_slot:
+        if not slot["held"]:
             # Recovered or reopened tasks count against the parallel limit too.
             await self._slots.acquire()
-            holds_slot = True
-        try:
-            while True:
-                rec = self.store.get(task_id)
-                if rec is None or not rec.active or not rec.thread_id:
-                    return
-                if rec.deadline_at and time.time() > rec.deadline_at:
-                    rec = self.store.update(task_id, status="timed_out",  # type: ignore[assignment]
-                                            error="Zeitlimit überschritten; T3 Code arbeitet ggf. weiter.")
-                    await self._emit(rec, "timed_out")
-                    return
-                try:
-                    res = await self.t3.wait(rec.thread_id, rec.run_id, self.wait_slice_ms)
-                    errors = 0
-                except asyncio.CancelledError:
-                    raise
-                except T3AuthRequired as exc:
-                    rec = self.store.update(task_id, error=str(exc))  # type: ignore[assignment]
-                    await self._emit(rec, "auth_required")
-                    await asyncio.sleep(300)
-                    continue
-                except Exception as exc:
-                    errors += 1
-                    log.warning("wait for task #%s failed (%d): %s", rec.short_id, errors, exc)
-                    await asyncio.sleep(min(60, 2 ** errors))
-                    continue
+            slot["held"] = True
+        while True:
+            rec = self.store.get(task_id)
+            if rec is None or not rec.active or not rec.thread_id:
+                return
+            if rec.deadline_at and time.time() > rec.deadline_at:
+                rec = self.store.update(task_id, status="timed_out",  # type: ignore[assignment]
+                                        error="Zeitlimit überschritten; T3 Code arbeitet ggf. weiter.")
+                self._retire(task_id, slot)
+                await self._emit(rec, "timed_out")
+                return
+            try:
+                res = await self.t3.wait(rec.thread_id, rec.run_id, self.wait_slice_ms)
+                errors = 0
+            except asyncio.CancelledError:
+                raise
+            except T3AuthRequired as exc:
+                rec = self.store.update(task_id, error=str(exc))  # type: ignore[assignment]
+                await self._emit(rec, "auth_required")
+                await asyncio.sleep(300)
+                continue
+            except Exception as exc:
+                errors += 1
+                log.warning("wait for task #%s failed (%d): %s", rec.short_id, errors, exc)
+                await asyncio.sleep(min(60, 2 ** errors))
+                continue
 
-                status = str(res.get("status") or "").lower()
-                # T3 may report "waiting" (pending approval/input) together with timedOut=true.
-                # Transitions follow the persisted status, so they survive restarts.
-                if status == "waiting":
-                    if rec.status != "waiting_input":
-                        rec = self.store.update(task_id, status="waiting_input")  # type: ignore[assignment]
-                        await self._emit(rec, "waiting_input")
-                    await asyncio.sleep(10)
-                    continue
-                if rec.status == "waiting_input":
-                    self.store.update(task_id, status="running")
-                if res.get("timedOut") or status in {"running", "starting", "queued", "preparing"}:
-                    continue
-                if status in TERMINAL_STATUSES or status in {"idle", ""}:
-                    async with self._lock(task_id):  # don't race a concurrent follow-up or cancel
-                        current = self.store.get(task_id)
-                        if current is None or not current.active:
-                            return
-                        if current.run_id and res.get("runId") and current.run_id != res.get("runId"):
-                            continue  # a follow-up started a newer run; this result is stale
-                        reply = await self._safe_read(rec.thread_id, res.get("runId"))
-                        if reply.get("status") == "running":
-                            # A follow-up was queued behind the finished run; keep watching.
-                            self.store.update(task_id, run_id=None)
-                            continue
-                        final = "completed" if status in {"completed", "idle", ""} else (
-                            "cancelled" if status in {"cancelled", "interrupted", "stopped"} else "failed")
-                        text = reply.get("text") or res.get("text") or ""
-                        rec = self.store.update(  # type: ignore[assignment]
-                            task_id, status=final, result=text[:8000] or None,
-                            thread_link=reply.get("link") or rec.thread_link,
-                            error=None if final == "completed" else f"T3-Status: {status}",
-                        )
-                        self.store.add_update(task_id, "result", text or status)
-                    # Retire this monitor before notifying, so a follow-up sent from a listener gets a new one.
-                    if self._monitors.get(task_id) is asyncio.current_task():
-                        del self._monitors[task_id]
-                    if holds_slot:
-                        self._slots.release()
-                        holds_slot = False
-                    await self._emit(rec, final)
+            status = str(res.get("status") or "").lower()
+            emit: tuple[TaskRecord, str] | None = None
+            delay = 0.0
+            async with self._lock(task_id):  # every wait-driven write sees the current row
+                current = self.store.get(task_id)
+                if current is None or not current.active:
                     return
-                log.debug("unknown T3 status %r for task #%s", status, rec.short_id)
-                await asyncio.sleep(5)
-        finally:
-            if self._monitors.get(task_id) is asyncio.current_task():
-                del self._monitors[task_id]
-            if holds_slot:
-                self._slots.release()
+                if current.run_id and res.get("runId") and current.run_id != res.get("runId"):
+                    continue  # response for an older run (a follow-up started a newer one): ignore
+                # T3 may report "waiting" (pending approval/input) together with timedOut=true.
+                if status == "waiting":
+                    delay = 10.0
+                    if current.status != "waiting_input":
+                        emit = (self.store.update(task_id, status="waiting_input"), "waiting_input")  # type: ignore[assignment]
+                elif current.status == "waiting_input":
+                    self.store.update(task_id, status="running")
+                if status == "waiting" or res.get("timedOut") or status in {"running", "starting", "queued", "preparing"}:
+                    pass
+                elif status in TERMINAL_STATUSES or status in {"idle", ""}:
+                    reply = await self._safe_read(rec.thread_id, res.get("runId"))
+                    if reply.get("status") == "running":
+                        # A follow-up was queued behind the finished run; keep watching.
+                        self.store.update(task_id, run_id=None)
+                        continue
+                    final = "completed" if status in {"completed", "idle", ""} else (
+                        "cancelled" if status in {"cancelled", "interrupted", "stopped"} else "failed")
+                    text = reply.get("text") or res.get("text") or ""
+                    rec = self.store.update(  # type: ignore[assignment]
+                        task_id, status=final, result=text[:8000] or None,
+                        thread_link=reply.get("link") or rec.thread_link,
+                        error=None if final == "completed" else f"T3-Status: {status}",
+                    )
+                    self.store.add_update(task_id, "result", text or status)
+                    emit = (rec, final)
+                else:
+                    log.debug("unknown T3 status %r for task #%s", status, rec.short_id)
+                    delay = 5.0
+            if emit is not None:
+                final_event = emit[1] != "waiting_input"
+                if final_event:
+                    self._retire(task_id, slot)
+                await self._emit(*emit)
+                if final_event:
+                    return
+            if delay:
+                await asyncio.sleep(delay)
 
     async def _safe_read(self, thread_id: str, run_id: str | None = None) -> dict:
         assert self.t3 is not None

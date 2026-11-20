@@ -359,3 +359,32 @@ async def test_leave_during_startup_starts_nothing(setup):
     gate.set()
     await asyncio.gather(start, stop)
     assert s._tasks == [] and s.live.closed and disconnected and 10 not in bridge.handlers
+
+
+async def test_cancelled_stop_caller_does_not_abandon_teardown(setup):
+    _, d = setup
+    s, bridge = make_session(d)
+    gate = asyncio.Event()
+
+    async def slow_connect():
+        await gate.wait()
+
+    s._connect_voice = slow_connect
+    start = asyncio.create_task(s.start())
+    await asyncio.sleep(0.02)
+    stopper = asyncio.create_task(s.stop("leave"))
+    await asyncio.sleep(0.02)
+    stopper.cancel()  # e.g. the interaction handler is cancelled
+    gate.set()
+    await start
+    await asyncio.sleep(0.05)
+    assert s.live.closed and 10 not in bridge.handlers and all(t.done() for t in s._tasks)
+    await s.stop("again")  # later calls await the same finished teardown
+
+
+async def test_playback_idle_marks_question_end(setup):
+    _, d = setup
+    s, _ = make_session(d)
+    s.clock_ms = 5000
+    s.on_bridge_event({"op": "playback_idle", "guildId": "10"})
+    assert s.playback_idle_after(4000) == 5000 and s.playback_idle_after(5000) is None
