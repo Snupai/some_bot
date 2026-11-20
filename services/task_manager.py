@@ -1,0 +1,304 @@
+"""Async scheduling and monitoring of T3 Code tasks.
+
+* ``submit`` stores a task and queues it. Workers launch it in T3 Code with
+  ``t3_thread_launch``, using the task ID as ``clientRequestId`` so retries
+  after a crash can't create duplicate threads.
+* Each launched task gets a monitor that loops ``t3_thread_wait`` in slices.
+  When the run ends it reads the agent's last reply with ``t3_thread_read``
+  and notifies listeners: the voice session, which tells GPT-Live, and the
+  Discord channel.
+* ``update`` sends follow-up instructions with ``t3_thread_send`` (mode
+  ``auto``: steer a running turn, or queue one).
+* ``cancel`` stops the run with ``t3_thread_interrupt``.
+* On startup, unfinished tasks are resumed from SQLite.
+
+At most ``max_parallel`` tasks are launched or running at once; the rest wait
+in the queue. Nothing here blocks the voice conversation.
+"""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import time
+import uuid
+from typing import Awaitable, Callable
+
+from .t3_mcp_client import TERMINAL_STATUSES, T3Error, T3McpClient
+from .t3_oauth import T3AuthRequired
+from .task_store import ACTIVE_STATUSES, TaskRecord, TaskStore
+
+log = logging.getLogger("bot.py.nyanjou.tasks")
+
+Listener = Callable[[TaskRecord, str], Awaitable[None]]
+
+
+class TaskManager:
+    def __init__(
+        self,
+        store: TaskStore,
+        t3: T3McpClient | None,
+        *,
+        max_parallel: int = 4,
+        task_timeout_s: int = 7200,
+        wait_slice_ms: int = 25000,
+        workspace_strategy: dict | None = None,
+        runtime_mode: str | None = None,
+    ) -> None:
+        self.store = store
+        self.t3 = t3
+        self.max_parallel = max_parallel
+        self.task_timeout_s = task_timeout_s
+        self.wait_slice_ms = wait_slice_ms
+        self.workspace_strategy = workspace_strategy
+        self.runtime_mode = runtime_mode or None
+        self._slots = asyncio.Semaphore(max_parallel)
+        self._queue: asyncio.Queue[str] = asyncio.Queue()
+        self._workers: list[asyncio.Task] = []
+        self._monitors: dict[str, asyncio.Task] = {}
+        self._listeners: list[Listener] = []
+        self._started = False
+
+    # ------------------------------------------------------------------ lifecycle
+    def add_listener(self, fn: Listener) -> None:
+        self._listeners.append(fn)
+
+    def remove_listener(self, fn: Listener) -> None:
+        with contextlib.suppress(ValueError):
+            self._listeners.remove(fn)
+
+    async def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        for i in range(self.max_parallel):
+            self._workers.append(asyncio.create_task(self._worker(), name=f"nyanjou-task-worker-{i}"))
+        await self.recover()
+
+    async def close(self) -> None:
+        for t in [*self._workers, *self._monitors.values()]:
+            t.cancel()
+        await asyncio.gather(*self._workers, *self._monitors.values(), return_exceptions=True)
+        self._workers.clear()
+        self._monitors.clear()
+        self._started = False
+
+    async def recover(self) -> None:
+        """Resume tasks that were active when the bot stopped."""
+        for rec in self.store.active():
+            if rec.thread_id:
+                log.info("resuming monitor for task #%s (thread %s)", rec.short_id, rec.thread_id)
+                self._spawn_monitor(rec)
+            else:
+                log.info("re-queueing task #%s", rec.short_id)
+                self.store.update(rec.id, status="queued")
+                await self._queue.put(rec.id)
+
+    async def _emit(self, rec: TaskRecord, kind: str) -> None:
+        for fn in list(self._listeners):
+            try:
+                await fn(rec, kind)
+            except Exception:
+                log.exception("task listener failed")
+
+    # ------------------------------------------------------------------ API
+    async def submit(self, rec: TaskRecord) -> TaskRecord:
+        if self.t3 is None:
+            raise T3Error("T3 Code ist nicht konfiguriert (T3_MCP_URL fehlt).")
+        rec.deadline_at = time.time() + self.task_timeout_s
+        rec.status = "queued"
+        rec = self.store.insert(rec)
+        self.store.add_update(rec.id, "prompt", rec.prompt)
+        await self._queue.put(rec.id)
+        await self._emit(rec, "queued")
+        return rec
+
+    async def update(self, rec: TaskRecord, message: str) -> TaskRecord:
+        if self.t3 is None:
+            raise T3Error("T3 Code ist nicht konfiguriert.")
+        if not rec.thread_id:
+            # Not launched yet: fold the change into the prompt that will be sent.
+            new_prompt = f"{rec.prompt}\n\nNachtrag des Nutzers:\n{message}"
+            self.store.update(rec.id, prompt=new_prompt)
+            self.store.add_update(rec.id, "followup", message)
+            return self.store.get(rec.id)  # type: ignore[return-value]
+        res = await self.t3.send(rec.thread_id, message, client_request_id=f"{rec.id}-{uuid.uuid4().hex[:8]}")
+        self.store.add_update(rec.id, "followup", message)
+        fields: dict = {"status": "running", "error": None, "notified": False}
+        if res.get("run_id"):
+            fields["run_id"] = res["run_id"]
+        if not rec.active:
+            fields["deadline_at"] = time.time() + self.task_timeout_s
+            fields["result"] = None
+        rec = self.store.update(rec.id, **fields)  # type: ignore[assignment]
+        if rec.id not in self._monitors:
+            self._spawn_monitor(rec)
+        await self._emit(rec, "updated")
+        return rec
+
+    async def cancel(self, rec: TaskRecord, reason: str = "Vom Nutzer abgebrochen") -> TaskRecord:
+        if rec.thread_id and self.t3 is not None and rec.active:
+            await self.t3.interrupt(rec.thread_id, rec.run_id, reason, client_request_id=f"{rec.id}-cancel")
+        mon = self._monitors.pop(rec.id, None)
+        if mon:
+            mon.cancel()
+        rec = self.store.update(rec.id, status="cancelled", error=reason)  # type: ignore[assignment]
+        await self._emit(rec, "cancelled")
+        return rec
+
+    def get(self, short_id: int) -> TaskRecord | None:
+        return self.store.get_by_short_id(short_id)
+
+    def list(self, **kw) -> list[TaskRecord]:
+        return self.store.list(**kw)
+
+    def latest_active_for(self, guild_id: int | None, user_id: int) -> TaskRecord | None:
+        tasks = self.store.list(guild_id=guild_id, user_id=user_id, statuses=ACTIVE_STATUSES, limit=1)
+        if tasks:
+            return tasks[0]
+        # Fall back to the user's most recent task in this guild (to amend a finished one).
+        recent = self.store.list(guild_id=guild_id, user_id=user_id, limit=1)
+        return recent[0] if recent else None
+
+    @property
+    def queued_count(self) -> int:
+        return self._queue.qsize()
+
+    # ------------------------------------------------------------------ internals
+    async def _worker(self) -> None:
+        while True:
+            task_id = await self._queue.get()
+            try:
+                rec = self.store.get(task_id)
+                if rec is None or rec.status != "queued":
+                    continue
+                await self._slots.acquire()
+                try:
+                    launched = await self._launch(rec)
+                except BaseException:
+                    self._slots.release()
+                    raise
+                if launched is None:
+                    self._slots.release()
+                    continue
+                self._spawn_monitor(launched, holds_slot=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("task worker error")
+            finally:
+                self._queue.task_done()
+
+    async def _launch(self, rec: TaskRecord) -> TaskRecord | None:
+        assert self.t3 is not None
+        rec = self.store.update(rec.id, status="starting")  # type: ignore[assignment]
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                res = await self.t3.launch(
+                    title=rec.title,
+                    message=rec.prompt,
+                    project_id=rec.project_id,
+                    scratch=rec.scratch,
+                    client_request_id=rec.id,  # idempotent retries
+                    workspace_strategy=None if rec.scratch else self.workspace_strategy,
+                    runtime_mode=self.runtime_mode,
+                )
+                rec = self.store.update(  # type: ignore[assignment]
+                    rec.id, status="running", thread_id=res["thread_id"],
+                    run_id=res.get("run_id"), thread_link=res.get("link"),
+                )
+                log.info("task #%s launched as T3 thread %s", rec.short_id, rec.thread_id)
+                await self._emit(rec, "started")
+                return rec
+            except T3AuthRequired as exc:
+                last_exc = exc
+                break
+            except Exception as exc:
+                last_exc = exc
+                log.warning("launch attempt %d for task #%s failed: %s", attempt + 1, rec.short_id, exc)
+                await asyncio.sleep(2 * (attempt + 1))
+        rec = self.store.update(rec.id, status="failed", error=f"Start fehlgeschlagen: {last_exc}")  # type: ignore[assignment]
+        await self._emit(rec, "failed")
+        return None
+
+    def _spawn_monitor(self, rec: TaskRecord, holds_slot: bool = False) -> None:
+        old = self._monitors.get(rec.id)
+        if old and not old.done():
+            return
+        task = asyncio.create_task(self._monitor(rec.id, holds_slot), name=f"nyanjou-monitor-{rec.short_id}")
+        self._monitors[rec.id] = task
+
+    async def _monitor(self, task_id: str, holds_slot: bool) -> None:
+        assert self.t3 is not None
+        errors = 0
+        notified_waiting = False
+        try:
+            while True:
+                rec = self.store.get(task_id)
+                if rec is None or not rec.active or not rec.thread_id:
+                    return
+                if rec.deadline_at and time.time() > rec.deadline_at:
+                    rec = self.store.update(task_id, status="timed_out",  # type: ignore[assignment]
+                                            error="Zeitlimit überschritten; T3 Code arbeitet ggf. weiter.")
+                    await self._emit(rec, "timed_out")
+                    return
+                try:
+                    res = await self.t3.wait(rec.thread_id, rec.run_id, self.wait_slice_ms)
+                    errors = 0
+                except asyncio.CancelledError:
+                    raise
+                except T3AuthRequired as exc:
+                    rec = self.store.update(task_id, error=str(exc))  # type: ignore[assignment]
+                    await self._emit(rec, "auth_required")
+                    await asyncio.sleep(300)
+                    continue
+                except Exception as exc:
+                    errors += 1
+                    log.warning("wait for task #%s failed (%d): %s", rec.short_id, errors, exc)
+                    await asyncio.sleep(min(60, 2 ** errors))
+                    continue
+
+                status = str(res.get("status") or "").lower()
+                if res.get("runId") and res.get("runId") != rec.run_id:
+                    self.store.update(task_id, run_id=res["runId"])
+                if res.get("timedOut") or status in {"running", "starting", "queued", "preparing"}:
+                    continue
+                if status == "waiting":
+                    if not notified_waiting:
+                        notified_waiting = True
+                        rec = self.store.update(task_id, status="waiting_input")  # type: ignore[assignment]
+                        await self._emit(rec, "waiting_input")
+                    await asyncio.sleep(10)
+                    continue
+                if status in TERMINAL_STATUSES or status in {"idle", ""}:
+                    reply = await self._safe_read(rec.thread_id)
+                    if reply.get("status") == "running":
+                        # A follow-up was queued behind the finished run; keep watching.
+                        self.store.update(task_id, run_id=None)
+                        continue
+                    final = "completed" if status in {"completed", "idle", ""} else (
+                        "cancelled" if status in {"cancelled", "interrupted", "stopped"} else "failed")
+                    text = reply.get("text") or res.get("text") or ""
+                    rec = self.store.update(  # type: ignore[assignment]
+                        task_id, status=final, result=text[:8000] or None,
+                        thread_link=reply.get("link") or rec.thread_link,
+                        error=None if final == "completed" else f"T3-Status: {status}",
+                    )
+                    self.store.add_update(task_id, "result", text or status)
+                    await self._emit(rec, final)
+                    return
+                log.debug("unknown T3 status %r for task #%s", status, rec.short_id)
+                await asyncio.sleep(5)
+        finally:
+            self._monitors.pop(task_id, None)
+            if holds_slot:
+                self._slots.release()
+
+    async def _safe_read(self, thread_id: str) -> dict:
+        assert self.t3 is not None
+        try:
+            return await self.t3.read_latest_reply(thread_id)
+        except Exception as exc:
+            log.warning("could not read result of thread %s: %s", thread_id, exc)
+            return {}
