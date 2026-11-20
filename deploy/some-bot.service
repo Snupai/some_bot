@@ -1,0 +1,35 @@
+# systemd unit for some_bot (incl. Nyanjou). Install: see docs/nyanjou-integration.md
+[Unit]
+Description=some_bot Discord bot (with Nyanjou voice assistant)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=somebot
+Group=somebot
+WorkingDirectory=/opt/some_bot
+# Node >= 22.12 must be on PATH (voice bridge). Run `uv sync --frozen --no-dev` before starting.
+Environment=PATH=/opt/some_bot/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+# bot.py loads /opt/some_bot/.env itself (python-dotenv)
+ExecStart=/opt/some_bot/.venv/bin/python bot.py
+Restart=on-failure
+RestartSec=5
+# Give Nyanjou time to leave voice channels and stop the bridge
+TimeoutStopSec=20
+KillMode=control-group
+
+# Hardening (the bot only needs to write inside its own directory)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/some_bot
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
