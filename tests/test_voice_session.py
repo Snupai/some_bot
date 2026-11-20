@@ -128,7 +128,7 @@ async def test_floor_mode_forwards_only_floor_holder_and_ignores_bots(setup):
         s.on_capture(BOB, voice_frame(8000))
         s.tick()
     assert s.gate.holder == BOB  # keeps the floor while talking
-    att = s.timeline.attribute(s.clock_ms, 8000, 500, min_voiced_ms=20)
+    att = s.timeline.attribute(s.clock_ms, 8000, 500)
     assert att.user_id == BOB
 
 
@@ -312,3 +312,50 @@ async def test_stop_waits_for_restart_and_closes_new_client(setup):
     # A restart after stop is a no-op.
     await s.restart_live(voice="ash")
     assert len(created) == 2
+
+
+async def test_guest_earlier_in_conversation_forces_confirmation(setup):
+    store, d = setup
+    s, _ = make_session(d, floor_release_ms=100)
+    s.live = FakeLive(None, s._callbacks())
+    for _ in range(30):
+        s.on_capture(GUEST, voice_frame())
+        s.tick()
+    for _ in range(3000):  # a minute later, and a Live reconnect in between
+        s.tick()
+    s._on_live_started("s2")
+    for _ in range(50):
+        s.on_capture(ALICE, voice_frame())
+        s.tick()
+    s._on_delegation("dd", s.clock_ms, "responses")
+    assert s.attribution_for("dd").others_recent == {GUEST}
+    out = json.loads(await s._on_function_call(FunctionCall("c", "t3_start_task", {
+        "title": "x", "task": "Baue eine kleine Webseite", "project": None, "new_project": False,
+        "risk_level": "normal", "risk_reason": None, "confirmation_id": None}, "dd")))
+    assert out["status"] == "confirmation_required"
+    assert store.list() == []
+
+
+async def test_leave_during_startup_starts_nothing(setup):
+    _, d = setup
+    s, bridge = make_session(d)
+    gate = asyncio.Event()
+
+    async def slow_connect():
+        await gate.wait()
+
+    s._connect_voice = slow_connect
+    disconnected = []
+
+    async def disc():
+        disconnected.append(True)
+
+    s._disconnect_voice = disc
+    start = asyncio.create_task(s.start())
+    await asyncio.sleep(0.02)
+    stop = asyncio.create_task(s.stop("leave"))
+    await asyncio.sleep(0.02)
+    assert not stop.done()
+    gate.set()
+    await asyncio.gather(start, stop)
+    assert s._tasks == [] and s.live.closed and disconnected and 10 not in bridge.handlers

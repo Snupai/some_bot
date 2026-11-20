@@ -91,9 +91,9 @@ to a Discord user based on audio provenance, not on what was said:
    (`NYANJOU_ATTRIBUTION_WINDOW_MS`, default 8 s), and that user is authorized. Even a short "ja" from someone
    else counts. If several people spoke, nobody spoke, or the call can't be matched to a delegation recorded in
    the current Live session, the call is refused and nothing is executed.
-5. Other people's earlier words stay in the model's context. So if anyone else spoke within
-   `NYANJOU_ATTRIBUTION_CONTEXT_MS` (default 60 s), starting or changing a task needs an explicit confirmation of
-   the assembled request from the authorized speaker.
+5. Other people's earlier words stay in the model's context, even across Live reconnects and `/voice` or
+   `/model` restarts. So once anyone else's audio has reached GPT-Live in this session, starting or changing a
+   task needs an explicit confirmation of the assembled request from the authorized speaker.
 6. Updating, cancelling or reading a task also checks that it belongs to the speaker and the same guild.
 
 Bots, including Nyanjou itself, are never listened to. Discord also doesn't send the bot its own audio.
@@ -105,7 +105,8 @@ when the backend flags `risk_level=high` or a keyword heuristic matches. The fir
 
 - same guild and the same Live session
 - same speaker
-- a **new** delegation, after that speaker actually said something following the request
+- a **new** delegation that comes after the confirmation question, with the speaker actually saying something
+  between the question and that delegation (speech from before the question doesn't count)
 - within 3 minutes
 
 The backend therefore can't confirm on its own. Normal development tasks start without confirmation. `/t3task`
@@ -253,7 +254,7 @@ All variables, with defaults, are in [`.env.example`](../.env.example). The most
 
 ```bash
 uv sync                       # includes the dev group (pytest)
-uv run pytest                 # 87 tests, ~15 s
+uv run pytest                 # 95 tests, ~17 s
 (cd bridge && npm test)       # bridge unit tests
 ```
 

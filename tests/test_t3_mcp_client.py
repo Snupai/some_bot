@@ -154,6 +154,9 @@ async def test_end_to_end_tools(t3_server, tmp_path):
     assert reply["text"] == "Fertig: Schritt 11"
     reply = await client.read_latest_reply("thread-1", run_id="run:thread-1:12")  # Schritt i runs as run i+3
     assert reply["text"] == "Fertig: Schritt 9"
+    # A run without its own reply must not borrow an earlier run's reply.
+    reply = await client.read_latest_reply("thread-1", run_id="run:thread-1:99")
+    assert reply["text"] == ""
 
     projects = await client.list_projects()
     assert [p["id"] for p in projects] == ["p1", "p2"]

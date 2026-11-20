@@ -29,15 +29,21 @@ async def env(tmp_path):
 
 
 def ctx(user=None, reason="single_speaker", guild=10, speakers=None, *, delegation="d1", offset=10_000,
-        others=(), session="s1", spoken_since=None):
-    """``spoken_since`` maps user -> ms of speech after any offset (simulated timeline)."""
+        others=(), session="s1", spoken_since=None, now=None, speech=None):
+    """``spoken_since``: user -> ms of speech in any interval. ``speech``: list of (user, t_ms) ticks."""
     att = Attribution(user, reason if user else (reason if reason != "single_speaker" else "no_speech"),
                       frozenset(speakers or ([user] if user else [])), others_recent=frozenset(others),
                       offset_ms=offset)
     spoken = spoken_since or {}
+
+    def between(uid, start, end):
+        if speech is not None:
+            return sum(20 for u, t in speech if u == uid and start < t <= end)
+        return spoken.get(uid, 0)
+
     return ToolContext(guild_id=guild, channel_id=5, attribution=att, user_display="tester",
                        delegation_id=delegation, live_session_id=session,
-                       speech_ms_since=lambda uid, t: spoken.get(uid, 0))
+                       now_ms=offset + 500 if now is None else now, speech_ms_between=between)
 
 
 START = {"title": "Minecraft-Webseite", "task": "Erstelle eine Webseite für meinen Minecraft-Server mit Next.js",
@@ -209,3 +215,37 @@ def test_tool_schemas_are_strict_compatible():
 ])
 def test_risk_heuristic(text, risky):
     assert looks_risky(text) is risky
+
+
+async def test_speech_before_the_question_does_not_confirm(env):
+    d, tm, store = env
+    risky = {**START, "task": "Lösche alle Backups", "risk_level": "high", "risk_reason": "x"}
+    # Delegation at 10 s, tool asks for confirmation at 11 s (now).
+    r = await call(d, "t3_start_task", risky, ctx(ALICE, delegation="d1", offset=10_000, now=11_000))
+    cid = r["confirmation_id"]
+    alice_before = [(ALICE, t) for t in range(9_000, 11_000, 20)]  # all speech precedes the question
+    r = await call(d, "t3_start_task", {**START, "confirmation_id": cid},
+                   ctx(ALICE, delegation="d2", offset=14_000, speech=alice_before))
+    assert r["error"] == "confirmation_not_heard"
+    # Speech after the question but after the confirming delegation doesn't count either.
+    r = await call(d, "t3_start_task", {**START, "confirmation_id": cid},
+                   ctx(ALICE, delegation="d2", offset=14_000, speech=[(ALICE, t) for t in range(14_100, 15_000, 20)]))
+    assert r["error"] == "confirmation_not_heard"
+    alice_after = [(ALICE, t) for t in range(12_000, 12_600, 20)]
+    r = await call(d, "t3_start_task", {**START, "confirmation_id": cid},
+                   ctx(ALICE, delegation="d2", offset=14_000, speech=alice_after))
+    assert r["ok"]
+
+
+async def test_update_confirmation_is_bound_to_resolved_task(env):
+    d, tm, store = env
+    await call(d, "t3_start_task", START, ctx(ALICE))  # task #1
+    upd = {"task_id": None, "message": "git push -f", "risk_level": "normal", "confirmation_id": None}
+    r = await call(d, "t3_update_task", upd, ctx(ALICE))
+    cid = r["confirmation_id"]
+    await call(d, "t3_start_task", {**START, "title": "Neu"}, ctx(ALICE))  # task #2 is now the latest
+    r = await call(d, "t3_update_task", {**upd, "confirmation_id": cid},
+                   ctx(ALICE, delegation="d2", offset=20_000, spoken_since={ALICE: 400}))
+    assert r["ok"] and r["task_id"] == 1
+    assert "git push -f" in store.get_by_short_id(1).prompt
+    assert "git push -f" not in store.get_by_short_id(2).prompt

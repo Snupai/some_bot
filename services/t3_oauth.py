@@ -67,9 +67,8 @@ class FileTokenStorage(TokenStorage):
 
     def _save(self, data: dict) -> None:
         data["server_url"] = self.server_url
-        if not self.path.parent.exists():
-            # Only restrict directories we create; never change permissions of an existing one.
-            self.path.parent.mkdir(parents=True, mode=0o700)
+        # mode only applies when the directory is created; an existing one keeps its permissions.
+        self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".t3_oauth.", suffix=".tmp")
         try:
             os.fchmod(fd, 0o600)

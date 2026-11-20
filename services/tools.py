@@ -147,7 +147,7 @@ class PendingConfirmation:
     guild_id: int
     live_session_id: str | None
     delegation_id: str | None
-    issued_offset_ms: int | None
+    issued_at_ms: int | None  # Live session clock when the confirmation was requested
     args: dict[str, Any]
     created_at: float = field(default_factory=time.time)
 
@@ -160,8 +160,9 @@ class ToolContext:
     user_display: str | None = None
     delegation_id: str | None = None
     live_session_id: str | None = None
-    # (user_id, session offset) -> ms of forwarded speech by that user since the offset
-    speech_ms_since: Callable[[int, int], int] | None = None
+    now_ms: int | None = None  # Live session clock when the tool runs
+    # (user_id, start_ms, end_ms) -> ms of forwarded speech by that user in (start, end]
+    speech_ms_between: Callable[[int, int, int], int] | None = None
 
 
 def _out(**kw: Any) -> str:
@@ -261,7 +262,7 @@ class ToolDispatcher:
         cid = secrets.token_hex(4)
         self._pending[cid] = PendingConfirmation(
             tool=tool, user_id=user_id, guild_id=ctx.guild_id, live_session_id=ctx.live_session_id,
-            delegation_id=ctx.delegation_id, issued_offset_ms=ctx.attribution.offset_ms, args=dict(args),
+            delegation_id=ctx.delegation_id, issued_at_ms=ctx.now_ms, args=dict(args),
         )
         return _out(ok=False, status="confirmation_required", confirmation_id=cid, message=(
             f"{reason} Fasse den Auftrag kurz zusammen und frage ausdrücklich nach Bestätigung. Nur wenn dieselbe "
@@ -270,9 +271,10 @@ class ToolDispatcher:
     def _redeem(self, conf_id: str, tool: str, ctx: ToolContext, user_id: int) -> dict | str:
         """Return the stored args, or an error JSON string.
 
-        A confirmation is only valid in the same guild and Live session, from the same speaker,
-        from a *new* delegation, and only after that speaker said something after the request.
-        The backend can't redeem its own confirmation without fresh speech.
+        A confirmation is only valid in the same guild and Live session, from the same speaker, from a
+        *new* delegation made after the confirmation was requested, and only if that speaker said
+        something between the request and that delegation. The backend can't redeem its own
+        confirmation, and speech from before the question doesn't count.
         """
         self._prune()
         pending = self._pending.get(conf_id)
@@ -281,12 +283,12 @@ class ToolDispatcher:
         if (pending is None or pending.tool != tool or pending.user_id != user_id
                 or pending.guild_id != ctx.guild_id or pending.live_session_id != ctx.live_session_id):
             return invalid
+        asked, answered = pending.issued_at_ms, ctx.attribution.offset_ms
         fresh = (
             ctx.delegation_id is not None and ctx.delegation_id != pending.delegation_id
-            and pending.issued_offset_ms is not None and ctx.attribution.offset_ms is not None
-            and ctx.attribution.offset_ms > pending.issued_offset_ms
-            and ctx.speech_ms_since is not None
-            and ctx.speech_ms_since(user_id, pending.issued_offset_ms) >= CONFIRMATION_MIN_SPEECH_MS
+            and asked is not None and answered is not None and answered > asked
+            and ctx.speech_ms_between is not None
+            and ctx.speech_ms_between(user_id, asked, answered) >= CONFIRMATION_MIN_SPEECH_MS
         )
         if not fresh:
             return _out(ok=False, error="confirmation_not_heard",
@@ -363,20 +365,21 @@ class ToolDispatcher:
             stored = self._redeem(conf_id, "t3_update_task", ctx, user_id)
             if isinstance(stored, str):
                 return stored
-            args = stored
+            args = stored  # contains the concrete task_id resolved when the confirmation was requested
             message = stored["message"]
         if not message:
             return _out(ok=False, error="empty_message")
+        rec = await self._owned(args.get("task_id"), ctx, user_id)
+        if rec is None:
+            return _out(ok=False, error="task_not_found", message="Keine passende Aufgabe dieser Person gefunden.")
         if not conf_id:
             reason = None
             if args.get("risk_level") == "high" or looks_risky(message):
                 reason = "Diese Änderung ist riskant oder irreversibel."
             reason = reason or self._others_note(ctx)
             if reason:
-                return self._ask_confirmation("t3_update_task", {**args, "message": message}, ctx, user_id, reason)
-        rec = await self._owned(args.get("task_id"), ctx, user_id)
-        if rec is None:
-            return _out(ok=False, error="task_not_found", message="Keine passende Aufgabe dieser Person gefunden.")
+                return self._ask_confirmation("t3_update_task", {**args, "message": message, "task_id": rec.short_id},
+                                              ctx, user_id, reason)
         if rec.status == "cancelled":
             return _out(ok=False, error="task_cancelled", message=f"Aufgabe #{rec.short_id} wurde abgebrochen.")
         rec = await self.tasks.update(rec, message)

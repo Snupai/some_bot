@@ -73,14 +73,19 @@ def test_attribution_ignores_old_speech_but_not_short_utterances():
     assert not a.ok and a.reason == "multiple_speakers"
 
 
-def test_attribution_reports_others_in_context_window():
+def test_floor_quiet_holder_frames_are_attributed():
+    g = SpeakerGate("floor", -45, floor_release_ms=200)
+    g.process({1: f(LOUD, -10)})
+    r = g.process({1: f(QUIET, -80)})  # holder pauses: audio still forwarded
+    assert r.audio is QUIET and not r.speakers and r.sources == {1}
+
+
+def test_speech_between_bounds():
     tl = SpeakerTimeline()
     for t in range(0, 1000, 20):
-        tl.record(t, frozenset({7}))  # guest, 40 s before the request
-    for t in range(40000, 42000, 20):
         tl.record(t, frozenset({1}))
-    a = tl.attribute(42000, window_ms=8000, tolerance_ms=500, context_ms=60000)
-    assert a.ok and a.user_id == 1 and a.others_recent == {7} and a.offset_ms == 42000
+    assert tl.speech_ms_between(1, 500, 1000) == 480
+    assert tl.speech_ms_between(1, 2000, 3000) == 0
 
 
 def test_mix_mode_does_not_forward_unvoiced_audio():

@@ -110,6 +110,10 @@ class VoiceSession:
         self._auth_cache: dict[int, tuple[bool, float]] = {}
         # Serializes Live client replacement (/voice, /model) with start and teardown.
         self._live_lock = asyncio.Lock()
+        self._stopping = False
+        # Everyone whose audio reached GPT-Live while this conversation's history exists. Kept across
+        # Live reconnects and restarts (history is carried over); never reset during the session.
+        self._contributors: set[int] = set()
 
     # ------------------------------------------------------------------ lifecycle
     def _live_settings(self) -> LiveSettings:
@@ -140,45 +144,56 @@ class VoiceSession:
         )
 
     async def start(self) -> None:
-        self.bridge.handlers[self.guild_id] = self
-        try:
-            async with self._live_lock:
+        # The whole startup (Live, voice connection, background tasks) holds the lock, so a concurrent
+        # stop() waits for it and then tears everything down; nothing starts on a closed session.
+        failed: BaseException | None = None
+        async with self._live_lock:
+            if self.closed:
+                raise RuntimeError("voice session already closed")
+            self.bridge.handlers[self.guild_id] = self
+            try:
                 self.live = self._live_factory(self._live_settings(), self._callbacks())
                 await self.live.start()
-            if self._connect_voice is not None:
-                await self._connect_voice()
-        except BaseException:
+                if self._connect_voice is not None:
+                    await self._connect_voice()
+            except BaseException as exc:
+                failed = exc
+            else:
+                if not self.closed:
+                    self._tasks = [
+                        asyncio.create_task(self._clock(), name=f"nyanjou-clock-{self.guild_id}"),
+                        asyncio.create_task(self._playback_sender(), name=f"nyanjou-playback-{self.guild_id}"),
+                        asyncio.create_task(self._idle_watchdog(), name=f"nyanjou-idle-{self.guild_id}"),
+                    ]
+        if failed is not None:
             await self.stop("start_failed", notify=False)
-            raise
-        self._tasks = [
-            asyncio.create_task(self._clock(), name=f"nyanjou-clock-{self.guild_id}"),
-            asyncio.create_task(self._playback_sender(), name=f"nyanjou-playback-{self.guild_id}"),
-            asyncio.create_task(self._idle_watchdog(), name=f"nyanjou-idle-{self.guild_id}"),
-        ]
+            raise failed
         log.info("voice session started in guild %s (model=%s voice=%s)", self.guild_id, self.model, self.voice)
 
     async def stop(self, reason: str = "leave", notify: bool = True) -> None:
-        if self.closed:
+        if self.closed and self._stopping:
             return
         self.closed = True
+        self._stopping = True
         log.info("stopping voice session in guild %s (%s)", self.guild_id, reason)
-        current = asyncio.current_task()
-        for t in self._tasks:
-            if t is not current:
+        # Waits for an in-flight start() or restart_live() before tearing down.
+        async with self._live_lock:
+            current = asyncio.current_task()
+            others = [t for t in self._tasks if t is not current]
+            for t in others:
                 t.cancel()
-        await asyncio.gather(*(t for t in self._tasks if t is not current), return_exceptions=True)
-        if self.bridge.handlers.get(self.guild_id) is self:
-            del self.bridge.handlers[self.guild_id]
-        async with self._live_lock:  # waits for an in-flight restart_live, then closes its client
+            await asyncio.gather(*others, return_exceptions=True)
+            if self.bridge.handlers.get(self.guild_id) is self:
+                del self.bridge.handlers[self.guild_id]
             if self.live is not None:
                 with contextlib.suppress(Exception):
                     await self.live.close()
-        if self._disconnect_voice is not None:
-            with contextlib.suppress(Exception):
-                await self._disconnect_voice()
-        self._buffers.clear()
-        self._delegations.clear()
-        self.timeline.reset()
+            if self._disconnect_voice is not None:
+                with contextlib.suppress(Exception):
+                    await self._disconnect_voice()
+            self._buffers.clear()
+            self._delegations.clear()
+            self.timeline.reset()
         if notify and self._on_closed is not None:
             with contextlib.suppress(Exception):
                 await self._on_closed(self, reason)
@@ -264,7 +279,8 @@ class VoiceSession:
                 continue
             frames[uid] = (mono, rms_dbfs(mono))
         result = self.gate.process(frames)
-        self.timeline.record(self.clock_ms, result.speakers)
+        self.timeline.record(self.clock_ms, result.sources)
+        self._contributors |= result.sources
 
         if result.speakers:
             self.stats.last_speech_at = time.time()
@@ -373,8 +389,9 @@ class VoiceSession:
 
     # ------------------------------------------------------------------ tools
     def _on_delegation(self, delegation_id: str, offset_ms: int, target: str) -> None:
-        att = self.timeline.attribute(offset_ms, self.cfg.attribution_window_ms, self.cfg.attribution_tolerance_ms,
-                                      context_ms=self.cfg.attribution_context_ms)
+        att = self.timeline.attribute(offset_ms, self.cfg.attribution_window_ms, self.cfg.attribution_tolerance_ms)
+        if att.user_id is not None:
+            att.others_recent = frozenset(self._contributors - {att.user_id})
         self._delegations[delegation_id] = att
         while len(self._delegations) > 64:
             self._delegations.popitem(last=False)
@@ -387,9 +404,6 @@ class VoiceSession:
             return self._delegations[delegation_id]
         return Attribution(None, "unknown_delegation")
 
-    def speech_ms_since(self, user_id: int, t_ms: int) -> int:
-        return self.timeline.voiced_ms_by_user(t_ms + 1, self.clock_ms).get(user_id, 0)
-
     async def _on_function_call(self, call: FunctionCall) -> str:
         self.stats.tool_calls += 1
         att = self.attribution_for(call.delegation_id)
@@ -400,7 +414,7 @@ class VoiceSession:
         ctx = ToolContext(
             guild_id=self.guild_id, channel_id=self.text_channel_id, attribution=att, user_display=name,
             delegation_id=call.delegation_id, live_session_id=self.live.session_id if self.live else None,
-            speech_ms_since=self.speech_ms_since,
+            now_ms=self.clock_ms, speech_ms_between=self.timeline.speech_ms_between,
         )
         out = await self.dispatcher.dispatch(call.name, call.arguments, ctx)
         if '"ok": false' in out:

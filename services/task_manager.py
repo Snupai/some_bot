@@ -140,7 +140,18 @@ class TaskManager:
             self.store.update(rec.id, prompt=new_prompt)
             self.store.add_update(rec.id, "followup", message)
             return self.store.get(rec.id)  # type: ignore[return-value]
-        res = await self.t3.send(rec.thread_id, message, client_request_id=f"{rec.id}-{uuid.uuid4().hex[:8]}")
+        reopening = not rec.active
+        if reopening:
+            # Reopening starts remote work, so it needs a slot first (refuse instead of exceeding the limit).
+            if self._slots.locked():
+                raise T3Error("Parallel-Limit erreicht; bitte später erneut versuchen.")
+            await self._slots.acquire()
+        try:
+            res = await self.t3.send(rec.thread_id, message, client_request_id=f"{rec.id}-{uuid.uuid4().hex[:8]}")
+        except BaseException:
+            if reopening:
+                self._slots.release()
+            raise
         self.store.add_update(rec.id, "followup", message)
         fields: dict = {"status": "running", "error": None, "notified": False}
         if res.get("run_id"):
@@ -149,7 +160,9 @@ class TaskManager:
             fields["deadline_at"] = time.time() + self.task_timeout_s
             fields["result"] = None
         rec = self.store.update(rec.id, **fields)  # type: ignore[assignment]
-        if rec.id not in self._monitors:
+        if reopening:
+            self._spawn_monitor(rec, holds_slot=True)
+        elif rec.id not in self._monitors:
             self._spawn_monitor(rec)
         await self._emit(rec, "updated")
         return rec
@@ -248,6 +261,8 @@ class TaskManager:
     def _spawn_monitor(self, rec: TaskRecord, holds_slot: bool = False) -> None:
         old = self._monitors.get(rec.id)
         if old and not old.done():
+            if holds_slot:
+                self._slots.release()  # an existing monitor already accounts for this task
             return
         task = asyncio.create_task(self._monitor(rec.id, holds_slot), name=f"nyanjou-monitor-{rec.short_id}")
         self._monitors[rec.id] = task
@@ -255,7 +270,6 @@ class TaskManager:
     async def _monitor(self, task_id: str, holds_slot: bool) -> None:
         assert self.t3 is not None
         errors = 0
-        notified_waiting = False
         if not holds_slot:
             # Recovered or reopened tasks count against the parallel limit too.
             await self._slots.acquire()
@@ -287,18 +301,15 @@ class TaskManager:
                     continue
 
                 status = str(res.get("status") or "").lower()
-                if res.get("runId") and not rec.run_id:
-                    self.store.update(task_id, run_id=res["runId"])
                 # T3 may report "waiting" (pending approval/input) together with timedOut=true.
+                # Transitions follow the persisted status, so they survive restarts.
                 if status == "waiting":
-                    if not notified_waiting:
-                        notified_waiting = True
+                    if rec.status != "waiting_input":
                         rec = self.store.update(task_id, status="waiting_input")  # type: ignore[assignment]
                         await self._emit(rec, "waiting_input")
                     await asyncio.sleep(10)
                     continue
-                if notified_waiting and rec.status == "waiting_input":
-                    notified_waiting = False
+                if rec.status == "waiting_input":
                     self.store.update(task_id, status="running")
                 if res.get("timedOut") or status in {"running", "starting", "queued", "preparing"}:
                     continue
@@ -323,12 +334,19 @@ class TaskManager:
                             error=None if final == "completed" else f"T3-Status: {status}",
                         )
                         self.store.add_update(task_id, "result", text or status)
+                    # Retire this monitor before notifying, so a follow-up sent from a listener gets a new one.
+                    if self._monitors.get(task_id) is asyncio.current_task():
+                        del self._monitors[task_id]
+                    if holds_slot:
+                        self._slots.release()
+                        holds_slot = False
                     await self._emit(rec, final)
                     return
                 log.debug("unknown T3 status %r for task #%s", status, rec.short_id)
                 await asyncio.sleep(5)
         finally:
-            self._monitors.pop(task_id, None)
+            if self._monitors.get(task_id) is asyncio.current_task():
+                del self._monitors[task_id]
             if holds_slot:
                 self._slots.release()
 

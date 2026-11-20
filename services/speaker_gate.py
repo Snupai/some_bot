@@ -26,8 +26,9 @@ from .audio import FRAME_MS, mix
 @dataclass
 class GateResult:
     audio: np.ndarray | None  # mono 48 kHz float frame to forward, None = silence
-    speakers: frozenset[int]  # users audible (voiced) in this tick
+    speakers: frozenset[int]  # users audible (voiced) in this tick (VAD, barge-in)
     floor_holder: int | None = None
+    sources: frozenset[int] = frozenset()  # every user whose audio is in `audio` (attribution)
 
 
 class SpeakerGate:
@@ -56,7 +57,7 @@ class SpeakerGate:
             # Only forward audio that is also recorded on the timeline (voiced frames).
             if not voiced:
                 return GateResult(None, frozenset())
-            return GateResult(mix([frames[u][0] for u in voiced]), frozenset(voiced))
+            return GateResult(mix([frames[u][0] for u in voiced]), frozenset(voiced), sources=frozenset(voiced))
 
         # floor mode
         if self.holder is not None:
@@ -79,7 +80,9 @@ class SpeakerGate:
         entry = frames.get(self.holder)
         audio = entry[0] if entry is not None else None
         speakers = frozenset({self.holder}) if self.holder in voiced else frozenset()
-        return GateResult(audio, speakers, self.holder)
+        # Quiet frames from the holder are forwarded too, so they are attributed to the holder.
+        sources = frozenset({self.holder}) if audio is not None else frozenset()
+        return GateResult(audio, speakers, self.holder, sources=sources)
 
 
 @dataclass
@@ -87,8 +90,8 @@ class Attribution:
     user_id: int | None
     reason: str
     speakers: frozenset[int] = field(default_factory=frozenset)
-    # Other users heard in the longer context window before the request. Their words are in the
-    # model's context, so actions then need an explicit confirmation from the speaker.
+    # Other users whose audio reached the model during this conversation. Their words may still be
+    # in the model's context, so actions then need an explicit confirmation from the speaker.
     others_recent: frozenset[int] = field(default_factory=frozenset)
     offset_ms: int | None = None
 
@@ -128,25 +131,20 @@ class SpeakerTimeline:
                 return next(iter(speakers))
         return None
 
-    def attribute(self, offset_ms: int, window_ms: int, tolerance_ms: int, min_voiced_ms: int = 0,
-                  context_ms: int = 0) -> Attribution:
-        """Exactly one user must have produced (forwarded) speech in the window.
+    def attribute(self, offset_ms: int, window_ms: int, tolerance_ms: int) -> Attribution:
+        """Exactly one user must be the source of forwarded audio in the window.
 
-        ``min_voiced_ms`` defaults to 0: any forwarded speech from a second user, even a short
-        "ja", makes the request ambiguous.
+        Any forwarded audio from a second user, even a short "ja", makes the request ambiguous.
         """
         start = offset_ms - window_ms - tolerance_ms
         end = offset_ms + tolerance_ms
-        by_user = self.voiced_ms_by_user(start, end)
-        relevant = {uid: ms for uid, ms in by_user.items() if ms > 0 and ms >= min_voiced_ms}
-        speakers = frozenset(relevant)
-        if not relevant:
-            return Attribution(None, "no_speech", frozenset(by_user), offset_ms=offset_ms)
-        if len(relevant) > 1:
+        speakers = frozenset(self.voiced_ms_by_user(start, end))
+        if not speakers:
+            return Attribution(None, "no_speech", offset_ms=offset_ms)
+        if len(speakers) > 1:
             return Attribution(None, "multiple_speakers", speakers, offset_ms=offset_ms)
-        user = next(iter(relevant))
-        others: frozenset[int] = frozenset()
-        if context_ms > window_ms:
-            ctx_users = self.voiced_ms_by_user(offset_ms - context_ms - tolerance_ms, end)
-            others = frozenset(u for u in ctx_users if u != user)
-        return Attribution(user, "single_speaker", speakers, others_recent=others, offset_ms=offset_ms)
+        return Attribution(next(iter(speakers)), "single_speaker", speakers, offset_ms=offset_ms)
+
+    def speech_ms_between(self, user_id: int, start_ms: int, end_ms: int) -> int:
+        """Forwarded audio from ``user_id`` with start_ms < t <= end_ms."""
+        return self.voiced_ms_by_user(start_ms + 1, end_ms).get(user_id, 0)

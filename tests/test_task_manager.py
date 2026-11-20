@@ -278,3 +278,54 @@ async def test_waiting_with_timed_out_flag_notifies_and_recovers(store):
     finally:
         tmmod.asyncio.sleep = real_sleep
     await tm.close()
+
+
+async def test_followup_from_completion_listener_gets_a_monitor(store):
+    t3 = FakeT3Client()
+    tm = TaskManager(store, t3, wait_slice_ms=10)
+    done = []
+
+    async def listener(r, kind):
+        if kind == "completed" and not done:
+            done.append(r.id)
+            await tm.update(store.get(r.id), "Noch ein Footer")
+
+    tm.add_listener(listener)
+    await tm.start()
+    r = await tm.submit(rec())
+    await eventually(lambda: store.get(r.id).result == "updated: Noch ein Footer")
+    assert store.get(r.id).status == "completed"
+    await tm.close()
+
+
+async def test_reopening_respects_parallel_limit(store):
+    t3 = FakeT3Client()
+    tm, _ = await make(store, t3, max_parallel=1)
+    a = await tm.submit(rec(title="A"))
+    await eventually(lambda: store.get(a.id).status == "completed")
+    t3.gate = asyncio.Event()
+    b = await tm.submit(rec(title="B"))
+    await eventually(lambda: store.get(b.id).status == "running")
+    with pytest.raises(Exception, match="Parallel-Limit"):
+        await tm.update(store.get(a.id), "mehr")
+    assert t3.sends == []
+    t3.gate.set()
+    await eventually(lambda: store.get(b.id).status == "completed")
+    await tm.update(store.get(a.id), "mehr")
+    await eventually(lambda: store.get(a.id).result == "updated: mehr")
+    await tm.close()
+
+
+async def test_recovered_waiting_task_returns_to_running(store):
+    class T(FakeT3Client):
+        async def wait(self, thread_id, run_id, timeout_ms):
+            await asyncio.sleep(0)
+            return {"threadId": thread_id, "runId": "thx:1", "status": "running", "timedOut": True}
+
+    t3 = T()
+    old = store.insert(rec())
+    t3.threads["thx"] = {"crid": old.id, "run": "thx:1", "waits": 0, "status": "running", "text": ""}
+    store.update(old.id, status="waiting_input", thread_id="thx", run_id="thx:1", deadline_at=time.time() + 600)
+    tm, _ = await make(store, t3)
+    await eventually(lambda: store.get(old.id).status == "running")
+    await tm.close()

@@ -310,7 +310,8 @@ class T3McpClient:
         replies = [i for i in (items or []) if i.get("type") == "assistant_message" and i.get("text")]
         replies.sort(key=lambda i: i.get("position") or 0, reverse=True)  # newest first
         if run_id:
-            replies = [i for i in replies if i.get("runId") == run_id] or replies
+            # Never report an earlier run's reply for a run that produced none.
+            replies = [i for i in replies if i.get("runId") == run_id]
         thread = res.get("thread") if isinstance(res, dict) else {}
         return {
             "text": replies[0]["text"] if replies else "",
