@@ -145,3 +145,16 @@ async def test_discover_grant_types(monkeypatch, grants, expected):
     monkeypatch.setattr(t3_oauth.httpx, "AsyncClient",
                         lambda **kw: real(transport=httpx.MockTransport(mock), **kw))
     assert await discover_grant_types(MCP) == expected
+
+
+async def test_existing_token_dir_permissions_untouched(tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o755)
+    os.chmod(shared, 0o755)
+    storage = FileTokenStorage(shared / "t.json", MCP)
+    await storage.set_tokens(OAuthToken(access_token="a"))
+    assert stat.S_IMODE(os.stat(shared).st_mode) == 0o755
+    assert stat.S_IMODE(os.stat(storage.path).st_mode) == 0o600
+    fresh = FileTokenStorage(tmp_path / "new" / "t.json", MCP)
+    await fresh.set_tokens(OAuthToken(access_token="b"))
+    assert stat.S_IMODE(os.stat(tmp_path / "new").st_mode) == 0o700

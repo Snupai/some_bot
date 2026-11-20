@@ -21,7 +21,7 @@ test('playback frame decode', () => {
 });
 
 test('frame queue reassembles odd chunks into 20 ms frames', () => {
-  const q = new PcmFrameQueue({ idleFrames: 2 });
+  const q = new PcmFrameQueue();
   q.push(Buffer.alloc(1000, 1));
   q.push(Buffer.alloc(FRAME_BYTES * 2 - 1000 + 10, 2));
   assert.equal(q.bufferedMs, 40);
@@ -37,9 +37,6 @@ test('frame queue reassembles odd chunks into 20 ms frames', () => {
   assert.equal(c.length, FRAME_BYTES);
   assert.equal(c[9], 2);
   assert.equal(c[10], 0);
-  // then silence while idle, then null
-  assert.ok(q.nextFrame().every((x) => x === 0));
-  assert.ok(q.nextFrame().every((x) => x === 0));
   assert.equal(q.nextFrame(), null);
 });
 

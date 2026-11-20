@@ -108,6 +108,8 @@ class VoiceSession:
         self._last_announced: int | None = None
         self._last_announce_at = 0.0
         self._auth_cache: dict[int, tuple[bool, float]] = {}
+        # Serializes Live client replacement (/voice, /model) with start and teardown.
+        self._live_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ lifecycle
     def _live_settings(self) -> LiveSettings:
@@ -140,8 +142,9 @@ class VoiceSession:
     async def start(self) -> None:
         self.bridge.handlers[self.guild_id] = self
         try:
-            self.live = self._live_factory(self._live_settings(), self._callbacks())
-            await self.live.start()
+            async with self._live_lock:
+                self.live = self._live_factory(self._live_settings(), self._callbacks())
+                await self.live.start()
             if self._connect_voice is not None:
                 await self._connect_voice()
         except BaseException:
@@ -166,9 +169,10 @@ class VoiceSession:
         await asyncio.gather(*(t for t in self._tasks if t is not current), return_exceptions=True)
         if self.bridge.handlers.get(self.guild_id) is self:
             del self.bridge.handlers[self.guild_id]
-        if self.live is not None:
-            with contextlib.suppress(Exception):
-                await self.live.close()
+        async with self._live_lock:  # waits for an in-flight restart_live, then closes its client
+            if self.live is not None:
+                with contextlib.suppress(Exception):
+                    await self.live.close()
         if self._disconnect_voice is not None:
             with contextlib.suppress(Exception):
                 await self._disconnect_voice()
@@ -181,17 +185,20 @@ class VoiceSession:
 
     async def restart_live(self, *, voice: str | None = None, model: str | None = None) -> None:
         """Voice and model are fixed per Live session; start a new one (history is kept)."""
-        if voice:
-            self.voice = voice
-        if model:
-            self.model = model
-        old = self.live
-        history = list(old.history) if old else []
-        if old is not None:
-            await old.close()
-        self.live = self._live_factory(self._live_settings(), self._callbacks())
-        self.live.history.extend(history)
-        await self.live.start()
+        async with self._live_lock:
+            if self.closed:
+                return
+            if voice:
+                self.voice = voice
+            if model:
+                self.model = model
+            old = self.live
+            history = list(old.history) if old else []
+            if old is not None:
+                await old.close()
+            self.live = self._live_factory(self._live_settings(), self._callbacks())
+            self.live.history.extend(history)
+            await self.live.start()
 
     # ------------------------------------------------------------------ bridge input
     def _authorized(self, user_id: int) -> bool:
@@ -366,17 +373,22 @@ class VoiceSession:
 
     # ------------------------------------------------------------------ tools
     def _on_delegation(self, delegation_id: str, offset_ms: int, target: str) -> None:
-        att = self.timeline.attribute(offset_ms, self.cfg.attribution_window_ms, self.cfg.attribution_tolerance_ms)
+        att = self.timeline.attribute(offset_ms, self.cfg.attribution_window_ms, self.cfg.attribution_tolerance_ms,
+                                      context_ms=self.cfg.attribution_context_ms)
         self._delegations[delegation_id] = att
         while len(self._delegations) > 64:
             self._delegations.popitem(last=False)
         log.debug("delegation %s at %dms attributed to %s (%s)", delegation_id, offset_ms, att.user_id, att.reason)
 
     def attribution_for(self, delegation_id: str | None) -> Attribution:
+        # Only delegations recorded in the current Live session count. A missing, unknown or
+        # evicted ID never falls back to "whoever spoke recently".
         if delegation_id and delegation_id in self._delegations:
             return self._delegations[delegation_id]
-        # No delegation record: attribute to "now" (conservative, same rules).
-        return self.timeline.attribute(self.clock_ms, self.cfg.attribution_window_ms, self.cfg.attribution_tolerance_ms)
+        return Attribution(None, "unknown_delegation")
+
+    def speech_ms_since(self, user_id: int, t_ms: int) -> int:
+        return self.timeline.voiced_ms_by_user(t_ms + 1, self.clock_ms).get(user_id, 0)
 
     async def _on_function_call(self, call: FunctionCall) -> str:
         self.stats.tool_calls += 1
@@ -385,7 +397,11 @@ class VoiceSession:
         if att.user_id is not None:
             info = self._member_info(att.user_id)
             name = info[0] if info else None
-        ctx = ToolContext(guild_id=self.guild_id, channel_id=self.text_channel_id, attribution=att, user_display=name)
+        ctx = ToolContext(
+            guild_id=self.guild_id, channel_id=self.text_channel_id, attribution=att, user_display=name,
+            delegation_id=call.delegation_id, live_session_id=self.live.session_id if self.live else None,
+            speech_ms_since=self.speech_ms_since,
+        )
         out = await self.dispatcher.dispatch(call.name, call.arguments, ctx)
         if '"ok": false' in out:
             self.stats.tool_denials += 1

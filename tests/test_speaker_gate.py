@@ -59,15 +59,37 @@ def test_attribution_single_multiple_none():
     assert not a.ok and a.reason == "no_speech"
 
 
-def test_attribution_ignores_short_blips_and_old_speech():
+def test_attribution_ignores_old_speech_but_not_short_utterances():
     tl = SpeakerTimeline()
-    for t in range(0, 1000, 20):  # user 9 spoke long ago
+    for t in range(0, 1000, 20):  # user 9 spoke long ago (outside window)
         tl.record(t, frozenset({9}))
     for t in range(20000, 22000, 20):
         tl.record(t, frozenset({1}))
-    tl.record(21000, frozenset({2}))  # 20 ms cough from user 2
     a = tl.attribute(22000, window_ms=8000, tolerance_ms=500)
     assert a.ok and a.user_id == 1
+    # Even a 20 ms forwarded "ja" from someone else makes the request ambiguous.
+    tl.record(21000, frozenset({2}))
+    a = tl.attribute(22000, window_ms=8000, tolerance_ms=500)
+    assert not a.ok and a.reason == "multiple_speakers"
+
+
+def test_attribution_reports_others_in_context_window():
+    tl = SpeakerTimeline()
+    for t in range(0, 1000, 20):
+        tl.record(t, frozenset({7}))  # guest, 40 s before the request
+    for t in range(40000, 42000, 20):
+        tl.record(t, frozenset({1}))
+    a = tl.attribute(42000, window_ms=8000, tolerance_ms=500, context_ms=60000)
+    assert a.ok and a.user_id == 1 and a.others_recent == {7} and a.offset_ms == 42000
+
+
+def test_mix_mode_does_not_forward_unvoiced_audio():
+    g = SpeakerGate("mix", -45)
+    r = g.process({1: f(QUIET, -90), 2: f(QUIET, -80)})
+    assert r.audio is None and not r.speakers
+    r = g.process({1: f(LOUD, -10), 2: f(LOUD * 0.001, -90)})
+    assert r.speakers == {1}
+    assert np.array_equal(r.audio, LOUD)  # quiet user 2 not mixed in
 
 
 def test_timeline_horizon_prunes():

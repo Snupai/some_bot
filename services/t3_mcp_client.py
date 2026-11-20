@@ -27,6 +27,7 @@ log = logging.getLogger("bot.py.nyanjou.t3")
 
 REQUIRED_TOOLS = ("t3_thread_launch", "t3_thread_wait", "t3_thread_read")
 OPTIONAL_TOOLS = ("t3_thread_send", "t3_thread_interrupt", "t3_project_list", "t3_thread_list")
+NEWEST_POSITION = 2**31 - 1
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted", "rolled_back", "error", "stopped"}
 
 
@@ -297,20 +298,22 @@ class T3McpClient:
             res = {"text": str(res)}
         return res
 
-    async def read_latest_reply(self, thread_id: str, max_chars: int = 6000) -> dict:
+    async def read_latest_reply(self, thread_id: str, max_chars: int = 6000, run_id: str | None = None) -> dict:
+        # A cursorless read pages forward from the *oldest* items for outside agents
+        # (OrchestratorMcpService.readThread); beforePosition selects the newest page.
         res = await self.call(
             "t3_thread_read",
-            {"threadId": thread_id, "view": "messages", "limit": 5, "maxCharsPerItem": max_chars, "runLimit": 1},
+            {"threadId": thread_id, "view": "messages", "limit": 10, "maxCharsPerItem": max_chars,
+             "runLimit": 1, "beforePosition": NEWEST_POSITION},
         )
         items = res.get("items") if isinstance(res, dict) else None
-        text = ""
-        for item in reversed(items or []):
-            if item.get("type") == "assistant_message" and item.get("text"):
-                text = item["text"]
-                break
+        replies = [i for i in (items or []) if i.get("type") == "assistant_message" and i.get("text")]
+        replies.sort(key=lambda i: i.get("position") or 0, reverse=True)  # newest first
+        if run_id:
+            replies = [i for i in replies if i.get("runId") == run_id] or replies
         thread = res.get("thread") if isinstance(res, dict) else {}
         return {
-            "text": text,
+            "text": replies[0]["text"] if replies else "",
             "status": (thread or {}).get("status"),
             "pending_requests": (thread or {}).get("pendingRequestCount", 0),
             "link": (thread or {}).get("link"),

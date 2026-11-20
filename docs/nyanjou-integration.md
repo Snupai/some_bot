@@ -87,18 +87,29 @@ to a Discord user based on audio provenance, not on what was said:
    therefore has exactly one source.
 3. Each 20 ms of audio sent is recorded on the Live session clock. GPT-Live reports when it delegated
    (`session.delegation.created.offset_ms`).
-4. A tool call may only run if **exactly one** user produced speech in the window before that point
-   (`NYANJOU_ATTRIBUTION_WINDOW_MS`, default 8 s), and that user is authorized. If several people spoke, nobody
-   spoke, or the delegation can't be matched, the call is refused and nothing is executed.
-5. Updating, cancelling or reading a task also checks that it belongs to the speaker and the same guild.
+4. A tool call may only run if **exactly one** user produced forwarded speech in the window before that point
+   (`NYANJOU_ATTRIBUTION_WINDOW_MS`, default 8 s), and that user is authorized. Even a short "ja" from someone
+   else counts. If several people spoke, nobody spoke, or the call can't be matched to a delegation recorded in
+   the current Live session, the call is refused and nothing is executed.
+5. Other people's earlier words stay in the model's context. So if anyone else spoke within
+   `NYANJOU_ATTRIBUTION_CONTEXT_MS` (default 60 s), starting or changing a task needs an explicit confirmation of
+   the assembled request from the authorized speaker.
+6. Updating, cancelling or reading a task also checks that it belongs to the speaker and the same guild.
 
 Bots, including Nyanjou itself, are never listened to. Discord also doesn't send the bot its own audio.
 
-**Risky work** needs an explicit spoken confirmation. This covers irreversible deletion, production changes,
-publishing private data and security-critical actions. It triggers when the backend flags `risk_level=high` or a
-keyword heuristic matches. The first call returns a single-use `confirmation_id`. Only a second call that quotes
-it, comes from the same speaker and arrives within 3 minutes starts the task. Normal development tasks start
-without confirmation.
+**Risky work** needs an explicit spoken confirmation, both for new tasks and for follow-up changes. This covers
+irreversible deletion, production changes, publishing private data and security-critical actions. It triggers
+when the backend flags `risk_level=high` or a keyword heuristic matches. The first call returns a single-use
+`confirmation_id`. It can only be redeemed under all of these conditions:
+
+- same guild and the same Live session
+- same speaker
+- a **new** delegation, after that speaker actually said something following the request
+- within 3 minutes
+
+The backend therefore can't confirm on its own. Normal development tasks start without confirmation. `/t3task`
+requires `bestaetigt: True` for requests the heuristic flags.
 
 T3's own access level is the final boundary. Threads Nyanjou starts can never exceed the level you approved for the
 bot in T3.
@@ -242,7 +253,7 @@ All variables, with defaults, are in [`.env.example`](../.env.example). The most
 
 ```bash
 uv sync                       # includes the dev group (pytest)
-uv run pytest                 # 75 tests, ~15 s
+uv run pytest                 # 87 tests, ~15 s
 (cd bridge && npm test)       # bridge unit tests
 ```
 
@@ -259,10 +270,12 @@ What is covered without real credentials:
 - **OAuth** against a mock authorization server shaped like T3's metadata: discovery, DCR, PKCE S256 verification,
   token stored with 0600, bot reuses token without a browser, missing or expired sign-in fails fast, grant-type
   discovery.
-- **Task manager**: queue, parallel limit, retries, auth failure, updates (running and finished), cancel, restart
-  recovery without duplicate launches, timeout, per-guild/per-user isolation.
-- **Security**: unattributed or multi-speaker calls refused, guests refused even after an authorized `/join`,
-  ownership across users and guilds, risky-task confirmation (wrong user, single-use), heuristic, strict tool
+- **Task manager**: queue, parallel limit (including recovered runs), retries, auth failure, updates (running and
+  finished), cancel (while queued, during launch, while running), stale-run results ignored, `waiting` + `timedOut`,
+  restart recovery without duplicate launches, timeout, per-guild/per-user isolation.
+- **Security**: unattributed, unknown-delegation or multi-speaker calls refused; guests refused even after an
+  authorized `/join`; others in context force confirmation; ownership across users and guilds; risky start and
+  update confirmation (no fresh speech, wrong user, other guild/session, single-use); heuristic; strict tool
   schemas.
 - **Voice session** with a fake bridge and fake Live: floor forwarding, bots and non-members ignored, guest policy,
   end-to-end delegation attribution, guest speech blocking execution, barge-in flush and suppression, 20 ms clock

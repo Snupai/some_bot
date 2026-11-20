@@ -82,6 +82,7 @@ class NyanjouConfig:
     allow_guest_conversation: bool = True
     speaker_mode: str = "floor"  # "floor" (one speaker at a time) or "mix"
     attribution_window_ms: int = 8000
+    attribution_context_ms: int = 60000
     attribution_tolerance_ms: int = 600
     floor_release_ms: int = 700
     vad_threshold_dbfs: float = -45.0
@@ -137,6 +138,7 @@ class NyanjouConfig:
             allow_guest_conversation=_bool("NYANJOU_ALLOW_GUEST_CONVERSATION", True),
             speaker_mode=_str("NYANJOU_SPEAKER_MODE", cls.speaker_mode).lower(),
             attribution_window_ms=_int("NYANJOU_ATTRIBUTION_WINDOW_MS", cls.attribution_window_ms),
+            attribution_context_ms=_int("NYANJOU_ATTRIBUTION_CONTEXT_MS", cls.attribution_context_ms),
             attribution_tolerance_ms=_int("NYANJOU_ATTRIBUTION_TOLERANCE_MS", cls.attribution_tolerance_ms),
             floor_release_ms=_int("NYANJOU_FLOOR_RELEASE_MS", cls.floor_release_ms),
             vad_threshold_dbfs=_float("NYANJOU_VAD_THRESHOLD_DBFS", cls.vad_threshold_dbfs),

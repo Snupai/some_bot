@@ -29,26 +29,17 @@ export function decodePlayback(buf) {
   };
 }
 
-/**
- * Byte queue that hands out exact 20 ms PCM frames. It returns silence while
- * a short gap is bridged, and `null` once the queue has been idle long enough
- * that the player should stop. Model audio often arrives in bursts, so this
- * keeps one continuous Discord resource per spoken reply instead of
- * restarting the player for every chunk.
- */
+/** Byte queue that hands out exact 20 ms PCM frames (the last one padded with silence). */
 export class PcmFrameQueue {
-  constructor({ idleFrames = 15 } = {}) {
+  constructor() {
     this.chunks = [];
     this.length = 0;
-    this.idleFrames = idleFrames;
-    this.emptyReads = 0;
   }
 
   push(pcm) {
     if (!pcm || pcm.length === 0) return;
     this.chunks.push(pcm);
     this.length += pcm.length;
-    this.emptyReads = 0;
   }
 
   clear() {
@@ -60,23 +51,14 @@ export class PcmFrameQueue {
     return Math.floor(this.length / FRAME_BYTES) * 20;
   }
 
-  /** @returns {Buffer|null} a frame, a silence frame, or null when idle */
+  /** @returns {Buffer|null} the next frame, or null when empty */
   nextFrame() {
-    if (this.length >= FRAME_BYTES) {
-      this.emptyReads = 0;
-      return this.take(FRAME_BYTES);
-    }
-    if (this.length > 0) {
-      // Pad the final partial frame with silence.
-      const tail = this.take(this.length);
-      const frame = Buffer.alloc(FRAME_BYTES);
-      tail.copy(frame);
-      this.emptyReads = 0;
-      return frame;
-    }
-    this.emptyReads += 1;
-    if (this.emptyReads > this.idleFrames) return null;
-    return Buffer.alloc(FRAME_BYTES);
+    if (this.length >= FRAME_BYTES) return this.take(FRAME_BYTES);
+    if (this.length === 0) return null;
+    // Pad the final partial frame with silence.
+    const frame = Buffer.alloc(FRAME_BYTES);
+    this.take(this.length).copy(frame);
+    return frame;
   }
 
   take(n) {

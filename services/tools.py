@@ -31,10 +31,11 @@ from .task_store import TaskRecord
 log = logging.getLogger("bot.py.nyanjou.tools")
 
 CONFIRMATION_TTL_S = 180
+CONFIRMATION_MIN_SPEECH_MS = 300
 
 _RISK_PATTERNS = [
     r"\brm\s+-rf\b", r"\bdrop\s+(database|table|schema)\b", r"\btruncate\b",
-    r"force[- ]?push", r"push\s+--force", r"\bgit\s+reset\s+--hard\b",
+    r"force[- ]?push", r"push\s+(--force|-f\b)", r"\bgit\s+reset\s+--hard\b",
     r"\b(prod|production|produktiv\w*|live-?system)\b",
     r"(alle|sämtliche|komplett)\w*\s+.{0,40}(lösch|entfern|vernicht)",
     r"(lösch|entfern)\w*\s+.{0,40}(repo|repository|datenbank|backup|server|alle)",
@@ -93,10 +94,13 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["task_id", "message"],
+            "required": ["task_id", "message", "risk_level", "confirmation_id"],
             "properties": {
                 "task_id": _nullable("integer", "Aufgabennummer, falls bekannt; sonst null."),
                 "message": {"type": "string", "description": "Die neue Anweisung, vollständig und eigenständig formuliert."},
+                "risk_level": {"type": "string", "enum": ["normal", "high"],
+                               "description": "high bei irreversiblen/gefährlichen Änderungen (wie bei t3_start_task)."},
+                "confirmation_id": _nullable("string", "Nur nach ausdrücklicher Bestätigung: die zuvor erhaltene confirmation_id; sonst null."),
             },
         },
     },
@@ -138,7 +142,12 @@ TOOL_NAMES = {t["name"] for t in TOOL_DEFINITIONS}
 
 @dataclass
 class PendingConfirmation:
+    tool: str
     user_id: int
+    guild_id: int
+    live_session_id: str | None
+    delegation_id: str | None
+    issued_offset_ms: int | None
     args: dict[str, Any]
     created_at: float = field(default_factory=time.time)
 
@@ -149,6 +158,10 @@ class ToolContext:
     channel_id: int | None
     attribution: Attribution
     user_display: str | None = None
+    delegation_id: str | None = None
+    live_session_id: str | None = None
+    # (user_id, session offset) -> ms of forwarded speech by that user since the offset
+    speech_ms_since: Callable[[int, int], int] | None = None
 
 
 def _out(**kw: Any) -> str:
@@ -244,6 +257,49 @@ class ToolDispatcher:
         for cid in [c for c, p in self._pending.items() if now - p.created_at > CONFIRMATION_TTL_S]:
             del self._pending[cid]
 
+    def _ask_confirmation(self, tool: str, args: dict, ctx: ToolContext, user_id: int, reason: str) -> str:
+        cid = secrets.token_hex(4)
+        self._pending[cid] = PendingConfirmation(
+            tool=tool, user_id=user_id, guild_id=ctx.guild_id, live_session_id=ctx.live_session_id,
+            delegation_id=ctx.delegation_id, issued_offset_ms=ctx.attribution.offset_ms, args=dict(args),
+        )
+        return _out(ok=False, status="confirmation_required", confirmation_id=cid, message=(
+            f"{reason} Fasse den Auftrag kurz zusammen und frage ausdrücklich nach Bestätigung. Nur wenn dieselbe "
+            f"Person danach klar zustimmt, rufe {tool} erneut mit dieser confirmation_id auf."))
+
+    def _redeem(self, conf_id: str, tool: str, ctx: ToolContext, user_id: int) -> dict | str:
+        """Return the stored args, or an error JSON string.
+
+        A confirmation is only valid in the same guild and Live session, from the same speaker,
+        from a *new* delegation, and only after that speaker said something after the request.
+        The backend can't redeem its own confirmation without fresh speech.
+        """
+        self._prune()
+        pending = self._pending.get(conf_id)
+        invalid = _out(ok=False, error="invalid_confirmation",
+                       message="Diese Bestätigung ist ungültig oder abgelaufen; bitte den Auftrag neu formulieren.")
+        if (pending is None or pending.tool != tool or pending.user_id != user_id
+                or pending.guild_id != ctx.guild_id or pending.live_session_id != ctx.live_session_id):
+            return invalid
+        fresh = (
+            ctx.delegation_id is not None and ctx.delegation_id != pending.delegation_id
+            and pending.issued_offset_ms is not None and ctx.attribution.offset_ms is not None
+            and ctx.attribution.offset_ms > pending.issued_offset_ms
+            and ctx.speech_ms_since is not None
+            and ctx.speech_ms_since(user_id, pending.issued_offset_ms) >= CONFIRMATION_MIN_SPEECH_MS
+        )
+        if not fresh:
+            return _out(ok=False, error="confirmation_not_heard",
+                        message="Ich habe noch keine Bestätigung dieser Person gehört. Bitte frage sie und warte auf ihre Antwort.")
+        del self._pending[conf_id]
+        return pending.args
+
+    def _others_note(self, ctx: ToolContext) -> str | None:
+        if ctx.attribution.others_recent:
+            return ("Vor diesem Auftrag haben auch andere Personen gesprochen; ihre Wünsche sind im Gesprächskontext. "
+                    "Darum muss die berechtigte Person den zusammengefassten Auftrag selbst bestätigen.")
+        return None
+
     # ------------------------------------------------------------------ tools
     async def _tool_t3_start_task(self, args: dict, ctx: ToolContext, user_id: int) -> str:
         assert self.tasks is not None
@@ -255,26 +311,21 @@ class ToolDispatcher:
 
         conf_id = args.get("confirmation_id")
         if conf_id:
-            pending = self._pending.get(conf_id)
-            if pending is None or pending.user_id != user_id:
-                return _out(ok=False, error="invalid_confirmation",
-                            message="Diese Bestätigung ist ungültig oder abgelaufen; bitte den Auftrag neu formulieren.")
-            del self._pending[conf_id]
-            args = {**pending.args, "confirmation_id": conf_id}
-            task_text = pending.args["task"]
-            title = pending.args["title"]
+            stored = self._redeem(conf_id, "t3_start_task", ctx, user_id)
+            if isinstance(stored, str):
+                return stored
+            # Launch exactly what was confirmed, not whatever accompanies the confirmation.
+            args = stored
+            task_text, title = stored["task"], stored["title"]
         else:
-            risky = args.get("risk_level") == "high" or looks_risky(task_text) or looks_risky(title)
-            if risky:
-                cid = secrets.token_hex(4)
-                self._pending[cid] = PendingConfirmation(user_id, {**args, "task": task_text, "title": title})
-                return _out(
-                    ok=False, status="confirmation_required", confirmation_id=cid,
-                    message=("Das ist eine riskante oder irreversible Aktion"
-                             + (f" ({args.get('risk_reason')})" if args.get("risk_reason") else "")
-                             + ". Fasse kurz zusammen, was passieren würde, und frage ausdrücklich nach Bestätigung. "
-                               "Nur wenn dieselbe Person klar zustimmt, rufe t3_start_task erneut mit dieser confirmation_id auf."),
-                )
+            reason = None
+            if args.get("risk_level") == "high" or looks_risky(task_text) or looks_risky(title):
+                reason = ("Das ist eine riskante oder irreversible Aktion"
+                          + (f" ({args.get('risk_reason')})" if args.get("risk_reason") else "") + ".")
+            reason = reason or self._others_note(ctx)
+            if reason:
+                return self._ask_confirmation("t3_start_task", {**args, "task": task_text, "title": title},
+                                              ctx, user_id, reason)
 
         scratch = bool(args.get("new_project")) and self.allow_scratch and not args.get("project")
         project_id = None
@@ -307,11 +358,22 @@ class ToolDispatcher:
     async def _tool_t3_update_task(self, args: dict, ctx: ToolContext, user_id: int) -> str:
         assert self.tasks is not None
         message = (args.get("message") or "").strip()
+        conf_id = args.get("confirmation_id")
+        if conf_id:
+            stored = self._redeem(conf_id, "t3_update_task", ctx, user_id)
+            if isinstance(stored, str):
+                return stored
+            args = stored
+            message = stored["message"]
         if not message:
             return _out(ok=False, error="empty_message")
-        if looks_risky(message):
-            return _out(ok=False, error="needs_new_task",
-                        message="Diese Änderung wirkt riskant. Starte sie als neue Aufgabe mit t3_start_task, damit sie bestätigt werden kann.")
+        if not conf_id:
+            reason = None
+            if args.get("risk_level") == "high" or looks_risky(message):
+                reason = "Diese Änderung ist riskant oder irreversibel."
+            reason = reason or self._others_note(ctx)
+            if reason:
+                return self._ask_confirmation("t3_update_task", {**args, "message": message}, ctx, user_id, reason)
         rec = await self._owned(args.get("task_id"), ctx, user_id)
         if rec is None:
             return _out(ok=False, error="task_not_found", message="Keine passende Aufgabe dieser Person gefunden.")

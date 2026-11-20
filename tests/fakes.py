@@ -46,7 +46,7 @@ class FakeT3Client:
         await asyncio.sleep(0)
         return {"threadId": thread_id, "runId": t["run"], "status": t["status"], "timedOut": t["status"] == "running"}
 
-    async def read_latest_reply(self, thread_id, max_chars=6000):
+    async def read_latest_reply(self, thread_id, max_chars=6000, run_id=None):
         t = self.threads[thread_id]
         return {"text": t["text"], "status": "idle" if t["status"] != "running" else "running", "link": None}
 

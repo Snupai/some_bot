@@ -28,10 +28,16 @@ async def env(tmp_path):
     store.close()
 
 
-def ctx(user=None, reason="single_speaker", guild=10, speakers=None):
+def ctx(user=None, reason="single_speaker", guild=10, speakers=None, *, delegation="d1", offset=10_000,
+        others=(), session="s1", spoken_since=None):
+    """``spoken_since`` maps user -> ms of speech after any offset (simulated timeline)."""
     att = Attribution(user, reason if user else (reason if reason != "single_speaker" else "no_speech"),
-                      frozenset(speakers or ([user] if user else [])))
-    return ToolContext(guild_id=guild, channel_id=5, attribution=att, user_display="tester")
+                      frozenset(speakers or ([user] if user else [])), others_recent=frozenset(others),
+                      offset_ms=offset)
+    spoken = spoken_since or {}
+    return ToolContext(guild_id=guild, channel_id=5, attribution=att, user_display="tester",
+                       delegation_id=delegation, live_session_id=session,
+                       speech_ms_since=lambda uid, t: spoken.get(uid, 0))
 
 
 START = {"title": "Minecraft-Webseite", "task": "Erstelle eine Webseite für meinen Minecraft-Server mit Next.js",
@@ -79,24 +85,65 @@ async def test_project_resolution_and_scratch(env):
     assert r["ok"] and store.list()[0].scratch
 
 
-async def test_risky_requires_confirmation_from_same_user(env):
+async def test_risky_requires_fresh_confirmation_from_same_user(env):
     d, tm, store = env
     risky = {**START, "task": "Lösche alle Backups auf dem Produktivserver", "risk_level": "high",
              "risk_reason": "irreversibel"}
-    r = await call(d, "t3_start_task", risky, ctx(ALICE))
+    r = await call(d, "t3_start_task", risky, ctx(ALICE, delegation="d1", offset=10_000))
     assert r["status"] == "confirmation_required"
     cid = r["confirmation_id"]
     assert store.list() == []
+    confirm = {**START, "confirmation_id": cid}
+    # Backend redeems on the same delegation without new speech -> refused.
+    r = await call(d, "t3_start_task", confirm, ctx(ALICE, delegation="d1", offset=10_000, spoken_since={ALICE: 900}))
+    assert r["error"] == "confirmation_not_heard"
+    # New delegation, but Alice hasn't said anything since the request -> refused.
+    r = await call(d, "t3_start_task", confirm, ctx(ALICE, delegation="d2", offset=12_000))
+    assert r["error"] == "confirmation_not_heard"
     # A different (even authorized) user can't confirm Alice's request.
-    r2 = await call(d, "t3_start_task", {**START, "confirmation_id": cid}, ctx(BOB))
-    assert r2["error"] == "invalid_confirmation"
-    # Alice confirms; the stored (original) task is launched, not whatever args come with the confirmation.
-    r3 = await call(d, "t3_start_task", {**START, "confirmation_id": cid}, ctx(ALICE))
-    assert r3["ok"]
+    r = await call(d, "t3_start_task", confirm, ctx(BOB, delegation="d2", offset=12_000, spoken_since={BOB: 900}))
+    assert r["error"] == "invalid_confirmation"
+    # Other guild / other Live session -> invalid.
+    r = await call(d, "t3_start_task", confirm, ctx(ALICE, guild=11, delegation="d2", offset=12_000,
+                                                    spoken_since={ALICE: 900}))
+    assert r["error"] == "invalid_confirmation"
+    r = await call(d, "t3_start_task", confirm, ctx(ALICE, session="s2", delegation="d2", offset=12_000,
+                                                    spoken_since={ALICE: 900}))
+    assert r["error"] == "invalid_confirmation"
+    # Alice confirms in a new utterance: the stored (original) task is launched.
+    r = await call(d, "t3_start_task", confirm, ctx(ALICE, delegation="d2", offset=12_000, spoken_since={ALICE: 900}))
+    assert r["ok"]
     assert "Backups" in store.list()[0].prompt
     # Confirmation ids are single-use.
-    r4 = await call(d, "t3_start_task", {**START, "confirmation_id": cid}, ctx(ALICE))
-    assert r4["error"] == "invalid_confirmation"
+    r = await call(d, "t3_start_task", confirm, ctx(ALICE, delegation="d3", offset=14_000, spoken_since={ALICE: 900}))
+    assert r["error"] == "invalid_confirmation"
+
+
+async def test_other_speakers_in_context_require_confirmation(env):
+    d, tm, store = env
+    # A guest talked earlier (their wishes are in the model context): Alice must confirm the assembled task.
+    r = await call(d, "t3_start_task", START, ctx(ALICE, others=[GUEST]))
+    assert r["status"] == "confirmation_required" and "andere Personen" in r["message"]
+    assert store.list() == []
+    r = await call(d, "t3_start_task", {**START, "confirmation_id": r["confirmation_id"]},
+                   ctx(ALICE, delegation="d2", offset=12_000, spoken_since={ALICE: 500}))
+    assert r["ok"]
+
+
+async def test_risky_or_contested_update_requires_confirmation(env):
+    d, tm, store = env
+    await call(d, "t3_start_task", START, ctx(ALICE))
+    upd = {"task_id": 1, "message": "dann git push -f auf main", "risk_level": "normal", "confirmation_id": None}
+    r = await call(d, "t3_update_task", upd, ctx(ALICE))
+    assert r["status"] == "confirmation_required"
+    r = await call(d, "t3_update_task", {**upd, "message": "Deploy aufräumen", "risk_level": "high"}, ctx(ALICE))
+    assert r["status"] == "confirmation_required"
+    r = await call(d, "t3_update_task", {**upd, "message": "Footer hinzufügen"}, ctx(ALICE, others=[GUEST]))
+    assert r["status"] == "confirmation_required"
+    cid = r["confirmation_id"]
+    r = await call(d, "t3_update_task", {**upd, "message": "x", "confirmation_id": cid},
+                   ctx(ALICE, delegation="d9", offset=20_000, spoken_since={ALICE: 400}))
+    assert r["ok"] and "Footer hinzufügen" in store.list()[0].prompt
 
 
 async def test_heuristic_catches_unflagged_risk(env):
@@ -110,7 +157,8 @@ async def test_update_cancel_ownership(env):
     d, tm, store = env
     await call(d, "t3_start_task", START, ctx(ALICE))
     # Bob can't touch Alice's task
-    r = await call(d, "t3_update_task", {"task_id": 1, "message": "mach es pink"}, ctx(BOB))
+    r = await call(d, "t3_update_task", {"task_id": 1, "message": "mach es pink", "risk_level": "normal",
+                                         "confirmation_id": None}, ctx(BOB))
     assert r["error"] == "task_not_found"
     r = await call(d, "t3_cancel_task", {"task_id": 1}, ctx(BOB))
     assert r["error"] == "no_active_task"
@@ -118,7 +166,8 @@ async def test_update_cancel_ownership(env):
     r = await call(d, "t3_task_status", {"task_id": 1}, ctx(ALICE, guild=99))
     assert r["error"] == "task_not_found"
     # Alice updates her latest task without specifying an id
-    r = await call(d, "t3_update_task", {"task_id": None, "message": "Design in Catppuccin Mocha"}, ctx(ALICE))
+    r = await call(d, "t3_update_task", {"task_id": None, "message": "Design in Catppuccin Mocha",
+                                         "risk_level": "normal", "confirmation_id": None}, ctx(ALICE))
     assert r["ok"] and "Catppuccin" in store.list()[0].prompt
     # Owner may manage everything
     r = await call(d, "t3_cancel_task", {"task_id": 1}, ctx(OWNER))
@@ -156,6 +205,7 @@ def test_tool_schemas_are_strict_compatible():
     ("drop database users", True),
     ("Lösche alle Dateien im Repo", True),
     ("Deploy auf Production", True),
+    ("git push -f origin main", True),
 ])
 def test_risk_heuristic(text, risky):
     assert looks_risky(text) is risky

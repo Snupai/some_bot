@@ -71,7 +71,7 @@ class GuildVoice {
     this.adapterMethods = null;
     this.encoder = new opus.OpusEncoder(SAMPLE_RATE, CHANNELS);
     this.decoders = new Map(); // userId -> {decoder, stream}
-    this.queue = new PcmFrameQueue({ idleFrames: 10 });
+    this.queue = new PcmFrameQueue();
     this.timer = null;
     this.speaking = false;
     this.silenceFramesLeft = 0;

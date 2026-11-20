@@ -156,3 +156,125 @@ async def test_isolation_queries(store):
     assert tm.latest_active_for(10, 1).id == a.id
     assert [r.user_id for r in tm.list(guild_id=10, user_id=1)] == [1]
     assert time.time() - a.created_at < 5
+
+
+# --- regressions from review ----------------------------------------------------------------
+
+
+async def test_cancel_while_waiting_for_slot_never_launches(store):
+    t3 = FakeT3Client()
+    t3.gate = asyncio.Event()
+    tm, _ = await make(store, t3, max_parallel=1)
+    first = await tm.submit(rec(title="A"))
+    await eventually(lambda: store.get(first.id).thread_id is not None)
+    second = await tm.submit(rec(title="B"))
+    await asyncio.sleep(0.05)  # worker picked B up and waits for the slot
+    await tm.cancel(store.get(second.id))
+    t3.gate.set()
+    await eventually(lambda: store.get(first.id).status == "completed")
+    await asyncio.sleep(0.05)
+    assert [launch["title"] for launch in t3.launches] == ["A"]
+    assert store.get(second.id).status == "cancelled"
+    await tm.close()
+
+
+async def test_cancel_during_launch_interrupts_returned_thread(store):
+    t3 = FakeT3Client()
+    release = asyncio.Event()
+    orig = t3.launch
+
+    async def slow_launch(**kw):
+        await release.wait()
+        return await orig(**kw)
+
+    t3.launch = slow_launch
+    tm, _ = await make(store, t3)
+    r = await tm.submit(rec())
+    await eventually(lambda: store.get(r.id).status == "starting")
+    cancel = asyncio.create_task(tm.cancel(store.get(r.id)))
+    await asyncio.sleep(0.05)
+    assert not cancel.done()  # waits for the in-flight launch instead of "succeeding" early
+    release.set()
+    await cancel
+    assert t3.interrupts == ["th1"]
+    assert store.get(r.id).status == "cancelled"
+    await asyncio.sleep(0.05)
+    assert store.get(r.id).status == "cancelled"
+    await tm.close()
+
+
+async def test_stale_run_result_is_ignored_after_followup(store):
+    class StaleT3(FakeT3Client):
+        async def wait(self, thread_id, run_id, timeout_ms):
+            t = self.threads[thread_id]
+            run_before = t["run"]
+            if self.gate is not None and not self.gate.is_set():
+                await self.gate.wait()
+                # Report the *old* run as completed after a follow-up started a new one.
+                return {"threadId": thread_id, "runId": run_before, "status": "completed", "timedOut": False}
+            return await super().wait(thread_id, run_id, timeout_ms)
+
+    t3 = StaleT3()
+    t3.gate = asyncio.Event()
+    tm, events = await make(store, t3)
+    r = await tm.submit(rec())
+    await eventually(lambda: store.get(r.id).thread_id is not None)
+    await asyncio.sleep(0.02)  # monitor is blocked inside wait() for run th1:1
+    await tm.update(store.get(r.id), "Catppuccin")
+    t3.gate.set()
+    await eventually(lambda: store.get(r.id).status == "completed")
+    assert store.get(r.id).result == "updated: Catppuccin"
+    assert store.get(r.id).run_id == "th1:2"
+    await tm.close()
+
+
+async def test_recovered_run_counts_against_parallel_limit(store):
+    t3 = FakeT3Client()
+    t3.gate = asyncio.Event()
+    old = store.insert(rec(title="old"))
+    t3.threads["thx"] = {"crid": old.id, "run": "thx:1", "waits": 0, "status": "running", "text": "old done"}
+    store.update(old.id, status="running", thread_id="thx", run_id="thx:1", deadline_at=time.time() + 600)
+    tm, _ = await make(store, t3, max_parallel=1)
+    new = await tm.submit(rec(title="new"))
+    await asyncio.sleep(0.1)
+    assert t3.launches == []  # the recovered run holds the only slot
+    t3.gate.set()
+    await eventually(lambda: store.get(new.id).status == "completed")
+    assert store.get(old.id).status == "completed"
+    await tm.close()
+
+
+async def test_waiting_with_timed_out_flag_notifies_and_recovers(store):
+    class WaitingT3(FakeT3Client):
+        phase = "waiting"
+
+        async def wait(self, thread_id, run_id, timeout_ms):
+            await asyncio.sleep(0)
+            t = self.threads[thread_id]
+            if self.phase == "waiting":
+                return {"threadId": thread_id, "runId": t["run"], "status": "waiting", "timedOut": True}
+            if self.phase == "running":
+                return {"threadId": thread_id, "runId": t["run"], "status": "running", "timedOut": True}
+            t["status"] = "completed"
+            return {"threadId": thread_id, "runId": t["run"], "status": "completed", "timedOut": False}
+
+    t3 = WaitingT3()
+    tm, events = await make(store, t3)
+    import services.task_manager as tmmod
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(s):
+        await real_sleep(min(s, 0.01))
+
+    tmmod.asyncio.sleep = fast_sleep
+    try:
+        r = await tm.submit(rec())
+        await eventually(lambda: (r.short_id, "waiting_input") in events)
+        assert store.get(r.id).status == "waiting_input"
+        t3.phase = "running"
+        await eventually(lambda: store.get(r.id).status == "running")
+        t3.phase = "done"
+        await eventually(lambda: store.get(r.id).status == "completed")
+    finally:
+        tmmod.asyncio.sleep = real_sleep
+    await tm.close()

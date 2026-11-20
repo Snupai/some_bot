@@ -56,6 +56,8 @@ class TaskManager:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._workers: list[asyncio.Task] = []
         self._monitors: dict[str, asyncio.Task] = {}
+        # Per-task lock: launch, follow-ups, cancel and applying results are serialized per task.
+        self._locks: dict[str, asyncio.Lock] = {}
         self._listeners: list[Listener] = []
         self._started = False
 
@@ -71,9 +73,11 @@ class TaskManager:
         if self._started:
             return
         self._started = True
+        # Recover first and let recovered monitors claim their slots before workers launch new tasks.
+        await self.recover()
+        await asyncio.sleep(0)
         for i in range(self.max_parallel):
             self._workers.append(asyncio.create_task(self._worker(), name=f"nyanjou-task-worker-{i}"))
-        await self.recover()
 
     async def close(self) -> None:
         for t in [*self._workers, *self._monitors.values()]:
@@ -93,6 +97,12 @@ class TaskManager:
                 log.info("re-queueing task #%s", rec.short_id)
                 self.store.update(rec.id, status="queued")
                 await self._queue.put(rec.id)
+
+    def _lock(self, task_id: str) -> asyncio.Lock:
+        lock = self._locks.get(task_id)
+        if lock is None:
+            lock = self._locks[task_id] = asyncio.Lock()
+        return lock
 
     async def _emit(self, rec: TaskRecord, kind: str) -> None:
         for fn in list(self._listeners):
@@ -116,6 +126,14 @@ class TaskManager:
     async def update(self, rec: TaskRecord, message: str) -> TaskRecord:
         if self.t3 is None:
             raise T3Error("T3 Code ist nicht konfiguriert.")
+        async with self._lock(rec.id):
+            rec = self.store.get(rec.id) or rec
+            if rec.status == "cancelled":
+                raise T3Error(f"Aufgabe #{rec.short_id} wurde abgebrochen.")
+            return await self._update_locked(rec, message)
+
+    async def _update_locked(self, rec: TaskRecord, message: str) -> TaskRecord:
+        assert self.t3 is not None
         if not rec.thread_id:
             # Not launched yet: fold the change into the prompt that will be sent.
             new_prompt = f"{rec.prompt}\n\nNachtrag des Nutzers:\n{message}"
@@ -137,12 +155,15 @@ class TaskManager:
         return rec
 
     async def cancel(self, rec: TaskRecord, reason: str = "Vom Nutzer abgebrochen") -> TaskRecord:
-        if rec.thread_id and self.t3 is not None and rec.active:
-            await self.t3.interrupt(rec.thread_id, rec.run_id, reason, client_request_id=f"{rec.id}-cancel")
+        # Taking the task lock waits out an in-flight launch, so a returned thread is interrupted too.
+        async with self._lock(rec.id):
+            rec = self.store.get(rec.id) or rec
+            if rec.thread_id and self.t3 is not None and rec.active:
+                await self.t3.interrupt(rec.thread_id, rec.run_id, reason, client_request_id=f"{rec.id}-cancel")
+            rec = self.store.update(rec.id, status="cancelled", error=reason)  # type: ignore[assignment]
         mon = self._monitors.pop(rec.id, None)
         if mon:
             mon.cancel()
-        rec = self.store.update(rec.id, status="cancelled", error=reason)  # type: ignore[assignment]
         await self._emit(rec, "cancelled")
         return rec
 
@@ -174,7 +195,9 @@ class TaskManager:
                     continue
                 await self._slots.acquire()
                 try:
-                    launched = await self._launch(rec)
+                    async with self._lock(task_id):
+                        rec = self.store.get(task_id)  # may have been cancelled while waiting for a slot
+                        launched = await self._launch(rec) if rec is not None and rec.status == "queued" else None
                 except BaseException:
                     self._slots.release()
                     raise
@@ -233,6 +256,10 @@ class TaskManager:
         assert self.t3 is not None
         errors = 0
         notified_waiting = False
+        if not holds_slot:
+            # Recovered or reopened tasks count against the parallel limit too.
+            await self._slots.acquire()
+            holds_slot = True
         try:
             while True:
                 rec = self.store.get(task_id)
@@ -260,10 +287,9 @@ class TaskManager:
                     continue
 
                 status = str(res.get("status") or "").lower()
-                if res.get("runId") and res.get("runId") != rec.run_id:
+                if res.get("runId") and not rec.run_id:
                     self.store.update(task_id, run_id=res["runId"])
-                if res.get("timedOut") or status in {"running", "starting", "queued", "preparing"}:
-                    continue
+                # T3 may report "waiting" (pending approval/input) together with timedOut=true.
                 if status == "waiting":
                     if not notified_waiting:
                         notified_waiting = True
@@ -271,21 +297,32 @@ class TaskManager:
                         await self._emit(rec, "waiting_input")
                     await asyncio.sleep(10)
                     continue
+                if notified_waiting and rec.status == "waiting_input":
+                    notified_waiting = False
+                    self.store.update(task_id, status="running")
+                if res.get("timedOut") or status in {"running", "starting", "queued", "preparing"}:
+                    continue
                 if status in TERMINAL_STATUSES or status in {"idle", ""}:
-                    reply = await self._safe_read(rec.thread_id)
-                    if reply.get("status") == "running":
-                        # A follow-up was queued behind the finished run; keep watching.
-                        self.store.update(task_id, run_id=None)
-                        continue
-                    final = "completed" if status in {"completed", "idle", ""} else (
-                        "cancelled" if status in {"cancelled", "interrupted", "stopped"} else "failed")
-                    text = reply.get("text") or res.get("text") or ""
-                    rec = self.store.update(  # type: ignore[assignment]
-                        task_id, status=final, result=text[:8000] or None,
-                        thread_link=reply.get("link") or rec.thread_link,
-                        error=None if final == "completed" else f"T3-Status: {status}",
-                    )
-                    self.store.add_update(task_id, "result", text or status)
+                    async with self._lock(task_id):  # don't race a concurrent follow-up or cancel
+                        current = self.store.get(task_id)
+                        if current is None or not current.active:
+                            return
+                        if current.run_id and res.get("runId") and current.run_id != res.get("runId"):
+                            continue  # a follow-up started a newer run; this result is stale
+                        reply = await self._safe_read(rec.thread_id, res.get("runId"))
+                        if reply.get("status") == "running":
+                            # A follow-up was queued behind the finished run; keep watching.
+                            self.store.update(task_id, run_id=None)
+                            continue
+                        final = "completed" if status in {"completed", "idle", ""} else (
+                            "cancelled" if status in {"cancelled", "interrupted", "stopped"} else "failed")
+                        text = reply.get("text") or res.get("text") or ""
+                        rec = self.store.update(  # type: ignore[assignment]
+                            task_id, status=final, result=text[:8000] or None,
+                            thread_link=reply.get("link") or rec.thread_link,
+                            error=None if final == "completed" else f"T3-Status: {status}",
+                        )
+                        self.store.add_update(task_id, "result", text or status)
                     await self._emit(rec, final)
                     return
                 log.debug("unknown T3 status %r for task #%s", status, rec.short_id)
@@ -295,10 +332,10 @@ class TaskManager:
             if holds_slot:
                 self._slots.release()
 
-    async def _safe_read(self, thread_id: str) -> dict:
+    async def _safe_read(self, thread_id: str, run_id: str | None = None) -> dict:
         assert self.t3 is not None
         try:
-            return await self.t3.read_latest_reply(thread_id)
+            return await self.t3.read_latest_reply(thread_id, run_id=run_id)
         except Exception as exc:
             log.warning("could not read result of thread %s: %s", thread_id, exc)
             return {}

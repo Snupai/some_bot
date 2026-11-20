@@ -184,12 +184,17 @@ async def test_guest_speaking_blocks_execution(setup):
     assert store.list() == []
 
 
-async def test_unknown_delegation_falls_back_conservatively(setup):
-    _, d = setup
+async def test_unknown_or_missing_delegation_never_falls_back_to_recent_speaker(setup):
+    store, d = setup
     s, _ = make_session(d)
     s.live = FakeLive(None, s._callbacks())
-    out = json.loads(await s._on_function_call(FunctionCall("c", "t3_list_tasks", {"only_active": True}, None)))
-    assert out["error"] == "speaker_not_identified"
+    for _ in range(50):  # authorized Alice spoke just now
+        s.on_capture(ALICE, voice_frame())
+        s.tick()
+    for did in (None, "never-recorded"):
+        out = json.loads(await s._on_function_call(FunctionCall("c", "t3_list_tasks", {"only_active": True}, did)))
+        assert out["error"] == "speaker_not_identified"
+    assert s.attribution_for("never-recorded").reason == "unknown_delegation"
 
 
 async def test_live_audio_upsampled_to_playback_and_barge_in_flushes(setup):
@@ -279,3 +284,31 @@ async def test_bridge_lost_stops_session(setup):
     await s.start()
     s.on_bridge_event({"op": "bridge_lost"})
     await eventually(lambda: s.closed)
+
+
+async def test_stop_waits_for_restart_and_closes_new_client(setup):
+    _, d = setup
+    s, _ = make_session(d)
+    created = []
+    slow = asyncio.Event()
+
+    class SlowLive(FakeLive):
+        async def start(self):
+            created.append(self)
+            if len(created) > 1:
+                await slow.wait()
+            await super().start()
+
+    s._live_factory = SlowLive
+    await s.start()
+    restart = asyncio.create_task(s.restart_live(voice="cedar"))
+    await asyncio.sleep(0.02)
+    stop = asyncio.create_task(s.stop("leave"))
+    await asyncio.sleep(0.02)
+    assert not stop.done()  # teardown waits for the in-flight replacement
+    slow.set()
+    await asyncio.gather(restart, stop)
+    assert all(c.closed for c in created)  # no Live client left connected
+    # A restart after stop is a no-op.
+    await s.restart_live(voice="ash")
+    assert len(created) == 2

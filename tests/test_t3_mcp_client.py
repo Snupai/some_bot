@@ -56,12 +56,20 @@ class FakeT3:
 
         @m.tool()
         def t3_thread_read(threadId: str, view: str | None = None, limit: int | None = None,
-                           maxCharsPerItem: int | None = None, runLimit: int | None = None) -> str:
+                           maxCharsPerItem: int | None = None, runLimit: int | None = None,
+                           beforePosition: int | None = None) -> str:
+            # Like T3 for outside agents: cursorless reads page forward from the OLDEST item.
             t = self.threads[threadId]
+            items = []
+            for n, msg in enumerate(t["messages"], start=1):
+                items.append({"position": 2 * n - 1, "type": "user_message", "text": msg, "runId": f"run:{threadId}:{n}"})
+                items.append({"position": 2 * n, "type": "assistant_message", "text": f"Fertig: {msg}",
+                              "runId": f"run:{threadId}:{n}"})
+            lim = limit or 10
+            page = list(reversed(items))[:lim] if beforePosition is not None else items[:lim]
             return json.dumps({"thread": {"threadId": threadId, "status": t["status"], "pendingRequestCount": 0,
                                           "link": f"[t](t3-thread://x/{threadId})"},
-                               "items": [{"type": "user_message", "text": t["messages"][-1]},
-                                         {"type": "assistant_message", "text": f"Fertig: {t['messages'][-1]}"}]})
+                               "items": page})
 
         @m.tool()
         def t3_thread_send(threadId: str, message: str, mode: str | None = None,
@@ -94,6 +102,7 @@ class FakeT3:
 @pytest.fixture
 async def t3_server():
     fake = FakeT3()
+    fake.clients = []
     port = free_port()
     config = uvicorn.Config(fake.mcp.streamable_http_app(), host="127.0.0.1", port=port, log_level="warning",
                             lifespan="on", timeout_graceful_shutdown=1)
@@ -105,12 +114,15 @@ async def t3_server():
         await asyncio.sleep(0.02)
     fake.url = f"http://127.0.0.1:{port}/mcp"
     yield fake
+    for c in fake.clients:  # close clients even when a test failed, so shutdown can't hang
+        await c.close()
     server.should_exit = True
     await asyncio.wait_for(task, 10)
 
 
 async def test_end_to_end_tools(t3_server, tmp_path):
     client = T3McpClient(t3_server.url, tmp_path / "tok.json", static_token="test-token")
+    t3_server.clients.append(client)
     await client.start()
     await client.wait_ready(10)
     assert {"t3_thread_launch", "t3_thread_wait", "t3_thread_read"} <= set(client.tools)
@@ -135,6 +147,14 @@ async def test_end_to_end_tools(t3_server, tmp_path):
     await client.interrupt("thread-1", s["run_id"], "stop", client_request_id="y")
     assert ("interrupt", {"threadId": "thread-1", "stop": True}) in t3_server.calls
 
+    # Many follow-ups later, the newest reply (and the one for a given run) is returned, not the oldest page.
+    for i in range(12):
+        await client.send("thread-1", f"Schritt {i}", client_request_id=f"s{i}")
+    reply = await client.read_latest_reply("thread-1")
+    assert reply["text"] == "Fertig: Schritt 11"
+    reply = await client.read_latest_reply("thread-1", run_id="run:thread-1:12")  # Schritt i runs as run i+3
+    assert reply["text"] == "Fertig: Schritt 9"
+
     projects = await client.list_projects()
     assert [p["id"] for p in projects] == ["p1", "p2"]
 
@@ -147,6 +167,7 @@ async def test_end_to_end_tools(t3_server, tmp_path):
 
 async def test_unknown_args_are_dropped(t3_server, tmp_path):
     client = T3McpClient(t3_server.url, tmp_path / "tok.json", static_token="t")
+    t3_server.clients.append(client)
     await client.start()
     await client.wait_ready(10)
     await client.call("t3_thread_launch", {"title": "x", "message": "m", "inventedParam": 1})

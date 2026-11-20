@@ -53,9 +53,10 @@ class SpeakerGate:
         voiced = {uid for uid, (_, db) in frames.items() if db >= self.threshold}
 
         if self.mode == "mix":
-            if not frames:
+            # Only forward audio that is also recorded on the timeline (voiced frames).
+            if not voiced:
                 return GateResult(None, frozenset())
-            return GateResult(mix([f for f, _ in frames.values()]), frozenset(voiced))
+            return GateResult(mix([frames[u][0] for u in voiced]), frozenset(voiced))
 
         # floor mode
         if self.holder is not None:
@@ -86,6 +87,10 @@ class Attribution:
     user_id: int | None
     reason: str
     speakers: frozenset[int] = field(default_factory=frozenset)
+    # Other users heard in the longer context window before the request. Their words are in the
+    # model's context, so actions then need an explicit confirmation from the speaker.
+    others_recent: frozenset[int] = field(default_factory=frozenset)
+    offset_ms: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -123,15 +128,25 @@ class SpeakerTimeline:
                 return next(iter(speakers))
         return None
 
-    def attribute(self, offset_ms: int, window_ms: int, tolerance_ms: int, min_voiced_ms: int = 200) -> Attribution:
+    def attribute(self, offset_ms: int, window_ms: int, tolerance_ms: int, min_voiced_ms: int = 0,
+                  context_ms: int = 0) -> Attribution:
+        """Exactly one user must have produced (forwarded) speech in the window.
+
+        ``min_voiced_ms`` defaults to 0: any forwarded speech from a second user, even a short
+        "ja", makes the request ambiguous.
+        """
         start = offset_ms - window_ms - tolerance_ms
         end = offset_ms + tolerance_ms
         by_user = self.voiced_ms_by_user(start, end)
-        # Ignore tiny blips (coughs, keyboard) from other users.
-        relevant = {uid: ms for uid, ms in by_user.items() if ms >= min_voiced_ms}
+        relevant = {uid: ms for uid, ms in by_user.items() if ms > 0 and ms >= min_voiced_ms}
         speakers = frozenset(relevant)
         if not relevant:
-            return Attribution(None, "no_speech", frozenset(by_user))
+            return Attribution(None, "no_speech", frozenset(by_user), offset_ms=offset_ms)
         if len(relevant) > 1:
-            return Attribution(None, "multiple_speakers", speakers)
-        return Attribution(next(iter(relevant)), "single_speaker", speakers)
+            return Attribution(None, "multiple_speakers", speakers, offset_ms=offset_ms)
+        user = next(iter(relevant))
+        others: frozenset[int] = frozenset()
+        if context_ms > window_ms:
+            ctx_users = self.voiced_ms_by_user(offset_ms - context_ms - tolerance_ms, end)
+            others = frozenset(u for u in ctx_users if u != user)
+        return Attribution(user, "single_speaker", speakers, others_recent=others, offset_ms=offset_ms)
