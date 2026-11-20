@@ -215,3 +215,11 @@ pip-selfcheck.json
 
 # Logs
 logs/
+### Nyanjou ###
+# Runtime data: task DB and T3 OAuth tokens (secrets!)
+data/
+# Voice bridge (Node): dependencies are installed with `npm ci`
+bridge/node_modules/
+# *.json is ignored above; the bridge manifests must be committed
+!bridge/package.json
+!bridge/package-lock.json
