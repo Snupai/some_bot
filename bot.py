@@ -68,6 +68,15 @@ class Bot(commands.AutoShardedBot):
     async def cleanup(self):
         """Perform cleanup operations before shutdown"""
         self.logger.info("Starting cleanup...")
+
+        # Stop Nyanjou first (voice sessions, T3 monitors, voice bridge subprocess)
+        # so it can shut down cleanly before its tasks are cancelled below.
+        nyanjou = getattr(self, "nyanjou", None)
+        if nyanjou is not None:
+            try:
+                await asyncio.wait_for(nyanjou.close(), timeout=10)
+            except Exception as e:
+                self.logger.error(f"Error stopping Nyanjou: {e}")
         
         # Cancel all running tasks
         tasks = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
@@ -133,7 +142,7 @@ def run_bot():
     bot = Bot()
     
     try:
-        bot.run(os.getenv('BOT_TOKEN'))
+        bot.run(os.getenv('BOT_TOKEN') or os.getenv('DISCORD_BOT_TOKEN'))
         bot.logger.info("Bot started")
         bot.logger.info(f"Bot is running as {bot.user.name} in {len(bot.guilds)} guilds")
     except Exception as e:
