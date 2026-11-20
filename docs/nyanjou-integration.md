@@ -109,6 +109,7 @@ when the backend flags `risk_level=high` or a keyword heuristic matches. The fir
   question) in the current Live session and before that delegation. Silence, interrupted playback and speech from
   before the question don't count.
 - within 3 minutes
+- it is the speaker's most recent open confirmation (a new question invalidates older ones)
 
 The backend therefore can't confirm on its own. Normal development tasks start without confirmation. `/t3task`
 requires `bestaetigt: True` for requests the heuristic flags.
@@ -255,7 +256,7 @@ All variables, with defaults, are in [`.env.example`](../.env.example). The most
 
 ```bash
 uv sync                       # includes the dev group (pytest)
-uv run pytest                 # 104 tests, ~25 s
+uv run pytest                 # 105 tests, ~25 s
 (cd bridge && npm test)       # bridge unit tests
 ```
 

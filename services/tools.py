@@ -261,6 +261,10 @@ class ToolDispatcher:
             del self._pending[cid]
 
     def _ask_confirmation(self, tool: str, args: dict, ctx: ToolContext, user_id: int, reason: str) -> str:
+        # At most one open confirmation per speaker and guild. A new question replaces older ones, so a
+        # spoken "yes" can only ever redeem the request that was asked last.
+        for old in [c for c, pend in self._pending.items() if pend.user_id == user_id and pend.guild_id == ctx.guild_id]:
+            del self._pending[old]
         cid = secrets.token_hex(4)
         self._pending[cid] = PendingConfirmation(
             tool=tool, user_id=user_id, guild_id=ctx.guild_id, live_session_id=ctx.live_session_id,

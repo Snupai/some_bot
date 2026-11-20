@@ -274,3 +274,16 @@ async def test_confirmation_requires_question_played_first(env):
                    ctx(ALICE, delegation="d2", offset=14_000, played=13_000,
                        speech=[(ALICE, t) for t in range(12_000, 12_600, 20)]))
     assert r["error"] == "confirmation_not_heard"
+
+
+async def test_new_question_invalidates_older_confirmations(env):
+    d, tm, store = env
+    risky_a = {**START, "title": "A", "task": "Lösche alle Backups von A", "risk_level": "high", "risk_reason": "x"}
+    risky_b = {**START, "title": "B", "task": "Lösche alle Backups von B", "risk_level": "high", "risk_reason": "x"}
+    a = await call(d, "t3_start_task", risky_a, ctx(ALICE, delegation="d1", offset=10_000))
+    b = await call(d, "t3_start_task", risky_b, ctx(ALICE, delegation="d2", offset=11_000))
+    yes = ctx(ALICE, delegation="d3", offset=14_000, spoken_since={ALICE: 600})
+    r = await call(d, "t3_start_task", {**START, "confirmation_id": a["confirmation_id"]}, yes)
+    assert r["error"] == "invalid_confirmation"  # Nyanjou only asked about B
+    r = await call(d, "t3_start_task", {**START, "confirmation_id": b["confirmation_id"]}, yes)
+    assert r["ok"] and [t.title for t in store.list()] == ["B"]
