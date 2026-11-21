@@ -62,6 +62,7 @@ async def test_client_auth_routing_and_reconnect():
             return
         await ws.send(json.dumps({"op": "ready", "version": 1}))
         await ws.send(bytes([0x01]) + (10).to_bytes(8, "big") + (2).to_bytes(8, "big") + b"\x00" * 3840)
+        await ws.send(json.dumps({"op": "error", "guildId": "10", "message": "connect ECONNREFUSED 1.2.3.4:8443"}))
         await ws.send(json.dumps({"op": "connection_state", "guildId": "10", "state": "ready"}))
         await ws.send(json.dumps({"op": "gateway", "guildId": "10",
                                   "payload": {"op": 4, "d": {"guild_id": "10", "channel_id": "20"}}}))
@@ -92,6 +93,7 @@ async def test_client_auth_routing_and_reconnect():
     await eventually(lambda: h.captures and proto.payloads)
     assert h.captures[0][0] == 2 and len(h.captures[0][1]) == 3840
     assert proto.states == ["ready"] and proto.payloads[0]["op"] == 4
+    assert "8443" in client.last_guild_error[10]
     await client.send_playback(10, b"\x00\x01")
     await client.send({"op": "flush", "guildId": "10"})
     await eventually(lambda: len(received) == 2)

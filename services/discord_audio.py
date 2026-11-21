@@ -73,6 +73,7 @@ class BridgeClient:
         self._send_lock = asyncio.Lock()
         self.handlers: dict[int, GuildAudioHandler] = {}
         self.protocols: dict[int, Any] = {}  # guild_id -> BridgeVoiceProtocol
+        self.last_guild_error: dict[int, str] = {}  # guild_id -> last voice connection error from the bridge
         self.last_error: str | None = None
 
     @property
@@ -140,6 +141,8 @@ class BridgeClient:
             self._ready.set()
             return
         gid = int(msg["guildId"]) if msg.get("guildId") else None
+        if op == "error" and gid is not None:
+            self.last_guild_error[gid] = str(msg.get("message") or "unknown error")[:300]
         proto = self.protocols.get(gid) if gid is not None else None
         if op == "gateway":
             if proto is not None:
