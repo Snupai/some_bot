@@ -307,8 +307,16 @@ What is covered without real credentials:
   `t3_thread_read` returned the expected reply, a follow-up via `t3_thread_send` was attributed to the new run, and
   `t3_thread_interrupt` returned `interrupt_requested`.
 
-**Not tested here** (needs a real Discord voice channel with people in it): the actual Discord voice connection
-(UDP, DAVE handshake) and real audio receive and playback through `@discordjs/voice`.
+- **Discord voice (2026-11-21, test server):** `/join` → voice gateway, UDP IP discovery and the DAVE MLS
+  handshake (protocol v1) reached `ready`. Nyanjou heard the speaker (live input transcripts) and answered in the
+  channel. Delegations from real Discord speech were attributed to the speaker's Discord user ID
+  (`single_speaker`) and the tools ran. An unauthorized account's `/join` was refused. The first attempts failed on
+  the host's outbound firewall, which led to the port list in Troubleshooting. Right after a speaker started,
+  `@discordjs/voice` logged a short burst of DAVE decrypt failures (about 50 packets in under 100 ms) before
+  decryption settled.
+
+**Not yet verified live:** the silence filter and the thread and environment tools were added after the voice
+test. They are covered by tests, and the thread tools were checked against a real T3 server.
 
 **T3 Connect note:** when `T3_MCP_URL` points at the T3 Connect relay, approval happens on the hosted app
 (`app.t3.codes`) and needs a sign-in with the linked T3 account. If the bot runs on the same machine as T3, use
