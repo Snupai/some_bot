@@ -314,10 +314,12 @@ a `127.0.0.1` sign-in ("unknown app"); use the relay URL with `--paste` for that
 - **`/join` says the voice bridge is not running**: check `node --version` (≥ 22.12) and run `npm ci` in `bridge/`.
   Then look in the logs for lines starting with `[bridge]`.
 - **"Die Sprachverbindung konnte nicht rechtzeitig aufgebaut werden"** together with `ECONNREFUSED` or `ETIMEDOUT
-  …:8443` in the `[bridge]` logs: an outbound firewall is blocking Discord voice. Discord voice needs **TCP 8443**
-  (voice gateway, Discord sends `…discord.media:8443` as the endpoint) and **UDP 50000–65535** (RTP audio). With
-  CSF, add `8443` to `TCP_OUT`/`TCP6_OUT` and `50000:65535` to `UDP_OUT`/`UDP6_OUT` in `/etc/csf/csf.conf`, then
-  run `csf -r`.
+  …:<port>` in the `[bridge]` logs: an outbound firewall is blocking Discord voice. Discord gives voice gateway
+  endpoints like `c-fra13-….discord.media:2087` on Cloudflare's HTTPS ports, so it needs **TCP 443, 2053, 2083,
+  2087, 2096 and 8443**, plus **UDP 50000–65535** for RTP audio. With CSF, add `2053,2083,2087,2096,8443` to
+  `TCP_OUT`/`TCP6_OUT` and `50000:65535` to `UDP_OUT`/`UDP6_OUT` in `/etc/csf/csf.conf`, then run `csf -r`.
+  Reloading the firewall makes the main bot reconnect, and Pycord's auto-sync then removes guild-scoped test
+  commands.
 - **Nyanjou joins but doesn't hear anyone**: set `NYANJOU_DEBUG=true` and check for `decrypt` messages from the
   bridge (DAVE). Make sure the bot has the Connect permission and isn't server-muted or deafened.
 - **"Sprecher nicht eindeutig"**: someone else spoke in the last 8 seconds. Let the authorized person repeat the

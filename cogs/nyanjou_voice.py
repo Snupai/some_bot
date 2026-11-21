@@ -142,7 +142,7 @@ class NyanjouVoice(commands.Cog):
             session = await self._start_session(ctx, channel)
         except asyncio.TimeoutError:
             detail = self.rt.bridge.last_guild_error.pop(ctx.guild.id, None) if self.rt.bridge else None
-            hint = (f"\nFehler der Voice-Bridge: `{detail}`\nPrüfe, ob der Server ausgehend TCP 8443 und "
+            hint = (f"\nFehler der Voice-Bridge: `{detail}`\nPrüfe, ob der Server ausgehend TCP 2053/2083/2087/2096/8443 und "
                     "UDP 50000–65535 zu Discord erlaubt (siehe docs/nyanjou-integration.md → Troubleshooting).") if detail else ""
             await ctx.followup.send("Die Sprachverbindung konnte nicht rechtzeitig aufgebaut werden." + hint)
             return
