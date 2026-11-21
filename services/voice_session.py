@@ -27,7 +27,7 @@ from typing import Any, Awaitable, Callable
 
 import numpy as np
 
-from .audio import FRAME_MS, DiscordToLive, LiveToDiscord, rms_dbfs, stereo48k_to_mono
+from .audio import FRAME_MS, DiscordToLive, LiveToDiscord, is_silence, rms_dbfs, stereo48k_to_mono
 from .config import NyanjouConfig
 from .live_client import FunctionCall, LiveCallbacks, LiveClient, LiveSettings
 from .prompts import backend_instructions, live_instructions
@@ -362,6 +362,10 @@ class VoiceSession:
     # ------------------------------------------------------------------ live output
     def _on_live_audio(self, pcm24: bytes) -> None:
         if self._suppress_output or self.closed:
+            return
+        if is_silence(pcm24):
+            # GPT-Live streams audio continuously, silence included. Dropping it lets the bridge go idle:
+            # Discord's speaking indicator turns off, and utterance ends (playback_idle) are detected.
             return
         pcm48 = self.to_discord.convert(pcm24)
         if not pcm48:

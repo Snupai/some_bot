@@ -411,3 +411,16 @@ async def test_question_marker_requires_completed_utterance_in_session(setup):
     s._on_live_started("s2")
     assert s.playback_idle_after(-1) is None
     await s.stop()
+
+
+async def test_silent_live_audio_is_dropped(setup):
+    _, d = setup
+    s, bridge = make_session(d)
+    await s.start()
+    s._on_live_audio(bytes(960))  # GPT-Live's continuous silence
+    await asyncio.sleep(0.02)
+    assert bridge.playback == [] and not s.playing and s._utterance_start is None
+    s._on_live_audio(b"\x00\x10" * 480)
+    await eventually(lambda: bridge.playback)
+    assert s.playing
+    await s.stop()

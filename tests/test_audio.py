@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from services.audio import (
+    is_silence,
     DiscordToLive,
     LiveToDiscord,
     mix,
@@ -80,3 +81,10 @@ def test_mix_soft_clips():
     out = mix([a, a])
     assert np.max(out) <= 32767
     assert np.max(out) > 30000
+
+
+def test_is_silence():
+    assert is_silence(bytes(960))
+    assert is_silence((np.full(480, 20, dtype="<i2")).tobytes())  # ~ -64 dBFS hiss
+    assert not is_silence(sine(300, 24000, 480, amp=3000).astype("<i2").tobytes())
+    assert is_silence(b"")

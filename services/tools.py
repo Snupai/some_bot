@@ -67,13 +67,15 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["title", "task", "project", "new_project", "risk_level", "risk_reason", "confirmation_id"],
+            "required": ["title", "task", "project", "environment", "new_project", "risk_level", "risk_reason",
+                         "confirmation_id"],
             "properties": {
                 "title": {"type": "string", "description": "Kurzer Titel (max. 8 Wörter)."},
                 "task": {"type": "string", "description": (
                     "Vollständiger, eigenständiger Arbeitsauftrag für den Coding-Agenten inkl. allem relevanten "
                     "Kontext aus dem Gespräch (Ziel, Technologien, Design, Einschränkungen, Akzeptanzkriterien).")},
                 "project": _nullable("string", "Name oder ID eines bestehenden T3-Projekts, falls der Nutzer eins nennt; sonst null (Standardprojekt)."),
+                "environment": _nullable("string", "Name/ID einer verlinkten T3-Umgebung (anderer Rechner), falls genannt; sonst null (dieses System)."),
                 "new_project": {"type": "boolean", "description": "true, wenn eine komplett neue, eigenständige App/ein neues Projekt angelegt werden soll."},
                 "risk_level": {"type": "string", "enum": ["normal", "high"], "description": (
                     "high nur bei irreversiblen/gefährlichen Aktionen: unwiderrufliches Löschen wichtiger Daten, "
@@ -135,6 +137,59 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "strict": True,
         "parameters": {"type": "object", "additionalProperties": False, "required": [], "properties": {}},
     },
+    {
+        "type": "function",
+        "name": "t3_list_environments",
+        "description": "Listet die T3-Code-Umgebungen (dieses System und verlinkte Rechner).",
+        "strict": True,
+        "parameters": {"type": "object", "additionalProperties": False, "required": [], "properties": {}},
+    },
+    {
+        "type": "function",
+        "name": "t3_list_threads",
+        "description": (
+            "Listet T3-Code-Threads des Nutzers (auch solche, die nicht von Nyanjou gestartet wurden), neueste zuerst. "
+            "Für Fragen wie 'Welcher Thread ist zuletzt fertig geworden?' oder 'Was läuft gerade in T3?'."
+        ),
+        "strict": True,
+        "parameters": {"type": "object", "additionalProperties": False,
+                       "required": ["query", "only_active", "environment"],
+                       "properties": {
+                           "query": _nullable("string", "Suchbegriff (Titel/Inhalt), sonst null."),
+                           "only_active": {"type": "boolean", "description": "Nur laufende/wartende Threads."},
+                           "environment": _nullable("string", "Umgebung (Name/ID), sonst null."),
+                       }},
+    },
+    {
+        "type": "function",
+        "name": "t3_thread_info",
+        "description": "Status und letzte Antwort eines bestimmten T3-Threads (per Titel oder ID).",
+        "strict": True,
+        "parameters": {"type": "object", "additionalProperties": False, "required": ["thread", "environment"],
+                       "properties": {
+                           "thread": {"type": "string", "description": "Thread-Titel (oder Teil davon) oder Thread-ID."},
+                           "environment": _nullable("string", "Umgebung (Name/ID), sonst null."),
+                       }},
+    },
+    {
+        "type": "function",
+        "name": "t3_message_thread",
+        "description": (
+            "Schickt eine Anweisung an einen BESTEHENDEN T3-Thread (per Titel oder ID), z. B. 'sag dem Thread X, er soll "
+            "die Tests reparieren'. Nyanjou verfolgt danach den Fortschritt und meldet das Ergebnis."
+        ),
+        "strict": True,
+        "parameters": {"type": "object", "additionalProperties": False,
+                       "required": ["thread", "environment", "message", "risk_level", "confirmation_id"],
+                       "properties": {
+                           "thread": {"type": "string", "description": "Thread-Titel (oder Teil davon) oder Thread-ID."},
+                           "environment": _nullable("string", "Umgebung (Name/ID), sonst null."),
+                           "message": {"type": "string", "description": "Die Anweisung, vollständig formuliert."},
+                           "risk_level": {"type": "string", "enum": ["normal", "high"],
+                                          "description": "high bei irreversiblen/gefährlichen Anweisungen."},
+                           "confirmation_id": _nullable("string", "Nur nach ausdrücklicher Bestätigung: die erhaltene confirmation_id; sonst null."),
+                       }},
+    },
 ]
 
 TOOL_NAMES = {t["name"] for t in TOOL_DEFINITIONS}
@@ -181,6 +236,7 @@ class ToolDispatcher:
         default_project_id: str = "",
         allow_scratch: bool = True,
         list_projects: Callable[[], Awaitable[list[dict]]] | None = None,
+        t3: Any = None,
     ) -> None:
         self.tasks = tasks
         self.is_authorized = is_authorized
@@ -188,6 +244,7 @@ class ToolDispatcher:
         self.default_project_id = default_project_id
         self.allow_scratch = allow_scratch
         self._list_projects = list_projects
+        self.t3 = t3
         self._pending: dict[str, PendingConfirmation] = {}
 
     async def dispatch(self, name: str, args: dict[str, Any], ctx: ToolContext) -> str:
@@ -351,6 +408,9 @@ class ToolDispatcher:
                     "Mehrere passende Projekte: " + err.split(":", 1)[1] if err.startswith("ambiguous")
                     else "Dieses Projekt kenne ich nicht. Frag nach oder nutze t3_list_projects."))
 
+        env, env_err = await self.resolve_environment(args.get("environment"))
+        if env_err:
+            return _out(ok=False, error=env_err, message="Diese T3-Umgebung kenne ich nicht. Nutze t3_list_environments.")
         prompt = (
             f"{task_text}\n\n---\n"
             f"Auftrag per Discord-Sprachassistent Nyanjou von Discord-Nutzer {ctx.user_display or user_id} "
@@ -358,7 +418,7 @@ class ToolDispatcher:
             "Frage nur bei irreversiblen oder sicherheitskritischen Schritten nach. "
             "Fasse am Ende kurz zusammen, was erledigt wurde, wo die Ergebnisse liegen und wie man sie startet."
         )
-        rec = TaskRecord(user_id=user_id, title=title, prompt=prompt, source="voice",
+        rec = TaskRecord(user_id=user_id, title=title, prompt=prompt, source="voice", environment_id=env,
                          guild_id=ctx.guild_id, channel_id=ctx.channel_id, project_id=project_id, scratch=scratch)
         rec = await self.tasks.submit(rec)
         return _out(ok=True, task_id=rec.short_id, status=rec.status,
@@ -422,3 +482,98 @@ class ToolDispatcher:
         projects = await self._list_projects()
         return _out(ok=True, default_project_id=self.default_project_id or None,
                     projects=[{"id": p.get("id"), "title": p.get("title")} for p in projects[:30]])
+
+
+    # ------------------------------------------------------------------ T3 threads & environments
+    async def resolve_environment(self, ref: str | None) -> tuple[str | None, str | None]:
+        """Returns (environment_id or None for this system, error)."""
+        if not ref or self.t3 is None:
+            return None, None
+        envs = await self.t3.list_environments()
+        r = ref.strip().lower()
+        for e in envs:
+            if e["id"] == ref:
+                return (None if e.get("current") else e["id"]), None
+        matches = [e for e in envs if r in str(e.get("label") or "").lower()]
+        if len(matches) == 1:
+            return (None if matches[0].get("current") else matches[0]["id"]), None
+        if any(w in r for w in ("hier", "dies", "lokal", "this", "local")):
+            return None, None
+        return None, "unknown_environment" if not matches else "ambiguous_environment"
+
+    async def resolve_thread(self, ref: str, environment_id: str | None) -> tuple[dict | None, str | None]:
+        assert self.t3 is not None
+        threads = await self.t3.list_threads(query=ref, environment_id=environment_id, limit=10)
+        exact = [t for t in threads if t["thread_id"] == ref or str(t.get("title") or "").lower() == ref.lower()]
+        if len(exact) == 1:
+            return exact[0], None
+        if len(threads) == 1:
+            return threads[0], None
+        if not threads:
+            return None, "thread_not_found"
+        return None, "ambiguous_thread:" + "; ".join(str(t.get("title")) for t in threads[:5])
+
+    async def _tool_t3_list_environments(self, args: dict, ctx: ToolContext, user_id: int) -> str:
+        if self.t3 is None:
+            return _out(ok=False, error="unavailable")
+        return _out(ok=True, environments=await self.t3.list_environments())
+
+    async def _tool_t3_list_threads(self, args: dict, ctx: ToolContext, user_id: int) -> str:
+        if self.t3 is None:
+            return _out(ok=False, error="unavailable")
+        env, err = await self.resolve_environment(args.get("environment"))
+        if err:
+            return _out(ok=False, error=err)
+        threads = await self.t3.list_threads(query=args.get("query"), only_active=bool(args.get("only_active")),
+                                             environment_id=env, limit=10)
+        return _out(ok=True, threads=threads)
+
+    async def _tool_t3_thread_info(self, args: dict, ctx: ToolContext, user_id: int) -> str:
+        if self.t3 is None:
+            return _out(ok=False, error="unavailable")
+        env, err = await self.resolve_environment(args.get("environment"))
+        if err:
+            return _out(ok=False, error=err)
+        thread, err = await self.resolve_thread(args.get("thread") or "", env)
+        if err:
+            return _out(ok=False, error=err.split(":")[0], message=err.split(":", 1)[-1] if ":" in err else None)
+        reply = await self.t3.read_latest_reply(thread["thread_id"], max_chars=1500, environment_id=env)
+        return _out(ok=True, thread={**thread, "status": reply.get("status") or thread.get("status"),
+                                     "last_reply": (reply.get("text") or "")[:1500]})
+
+    async def _tool_t3_message_thread(self, args: dict, ctx: ToolContext, user_id: int) -> str:
+        assert self.tasks is not None
+        if self.t3 is None:
+            return _out(ok=False, error="unavailable")
+        message = (args.get("message") or "").strip()
+        conf_id = args.get("confirmation_id")
+        if conf_id:
+            stored = self._redeem(conf_id, "t3_message_thread", ctx, user_id)
+            if isinstance(stored, str):
+                return stored
+            args, message = stored, stored["message"]
+        if not message:
+            return _out(ok=False, error="empty_message")
+        if conf_id:
+            env, thread = args.get("_environment_id"), {"thread_id": args["_thread_id"], "title": args.get("_title")}
+        else:
+            env, err = await self.resolve_environment(args.get("environment"))
+            if err:
+                return _out(ok=False, error=err)
+            thread, err = await self.resolve_thread(args.get("thread") or "", env)
+            if err:
+                return _out(ok=False, error=err.split(":")[0], message=err.split(":", 1)[-1] if ":" in err else None)
+            reason = None
+            if args.get("risk_level") == "high" or looks_risky(message):
+                reason = "Diese Anweisung ist riskant oder irreversibel."
+            reason = reason or self._others_note(ctx)
+            if reason:
+                # Bind the confirmation to the concrete thread resolved now.
+                return self._ask_confirmation("t3_message_thread", {
+                    **args, "message": message, "_thread_id": thread["thread_id"], "_environment_id": env,
+                    "_title": thread.get("title")}, ctx, user_id, reason)
+        rec = await self.tasks.adopt(thread_id=thread["thread_id"], environment_id=env,
+                                     title=str(thread.get("title") or "T3-Thread"), message=message, user_id=user_id,
+                                     guild_id=ctx.guild_id, channel_id=ctx.channel_id)
+        return _out(ok=True, task_id=rec.short_id, status=rec.status,
+                    message=f"An '{thread.get('title')}' weitergegeben; ich melde mich, wenn der Thread fertig ist.")

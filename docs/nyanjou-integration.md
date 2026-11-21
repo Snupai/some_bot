@@ -226,8 +226,14 @@ intents are already enabled in `bot.py`.
 > … T3 finishes → `t3_thread_wait` returns `completed` → `t3_thread_read` → commentary → **Nyanjou** tells you, and
 > an embed is posted in the text channel.
 
+Beyond its own tasks, Nyanjou can see and steer your other T3 threads and environments by voice. It can list
+threads ("welcher Thread ist zuletzt fertig geworden?"), report a thread's status and last reply, and send an
+instruction to an existing thread; Nyanjou then tracks that thread like a task and reports when it finishes.
+`environment` selects a linked T3 environment (another machine).
+
 T3 tools used, all taken from T3's outside-agent docs and their published schemas: `t3_thread_launch`,
-`t3_thread_wait`, `t3_thread_read`, `t3_thread_send`, `t3_thread_interrupt`, `t3_project_list`. Tools are discovered
+`t3_thread_wait`, `t3_thread_read`, `t3_thread_send`, `t3_thread_interrupt`, `t3_thread_list`,
+`t3_thread_search`, `t3_project_list`, `t3_environment_links`. Tools are discovered
 at connect time, and arguments are filtered against each tool's `inputSchema`. The task ID is passed as
 `clientRequestId`, so a launch retried after a crash can't create a duplicate thread.
 
@@ -256,7 +262,7 @@ All variables, with defaults, are in [`.env.example`](../.env.example). The most
 
 ```bash
 uv sync                       # includes the dev group (pytest)
-uv run pytest                 # 106 tests, ~25 s
+uv run pytest                 # 112 tests, ~25 s
 (cd bridge && npm test)       # bridge unit tests
 ```
 

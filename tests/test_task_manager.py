@@ -205,14 +205,14 @@ async def test_cancel_during_launch_interrupts_returned_thread(store):
 
 async def test_stale_run_result_is_ignored_after_followup(store):
     class StaleT3(FakeT3Client):
-        async def wait(self, thread_id, run_id, timeout_ms):
+        async def wait(self, thread_id, run_id, timeout_ms, environment_id=None):
             t = self.threads[thread_id]
             run_before = t["run"]
             if self.gate is not None and not self.gate.is_set():
                 await self.gate.wait()
                 # Report the *old* run as completed after a follow-up started a new one.
                 return {"threadId": thread_id, "runId": run_before, "status": "completed", "timedOut": False}
-            return await super().wait(thread_id, run_id, timeout_ms)
+            return await super().wait(thread_id, run_id, timeout_ms, environment_id)
 
     t3 = StaleT3()
     t3.gate = asyncio.Event()
@@ -248,7 +248,7 @@ async def test_waiting_with_timed_out_flag_notifies_and_recovers(store):
     class WaitingT3(FakeT3Client):
         phase = "waiting"
 
-        async def wait(self, thread_id, run_id, timeout_ms):
+        async def wait(self, thread_id, run_id, timeout_ms, environment_id=None):
             await asyncio.sleep(0)
             t = self.threads[thread_id]
             if self.phase == "waiting":
@@ -318,7 +318,7 @@ async def test_reopening_respects_parallel_limit(store):
 
 async def test_recovered_waiting_task_returns_to_running(store):
     class T(FakeT3Client):
-        async def wait(self, thread_id, run_id, timeout_ms):
+        async def wait(self, thread_id, run_id, timeout_ms, environment_id=None):
             await asyncio.sleep(0)
             return {"threadId": thread_id, "runId": "thx:1", "status": "running", "timedOut": True}
 
@@ -353,13 +353,13 @@ async def test_timeout_listener_can_reopen_task(store):
 @pytest.mark.parametrize("with_run_id", [True, False])
 async def test_late_waiting_from_old_run_is_ignored(store, with_run_id):
     class LateT3(FakeT3Client):
-        async def wait(self, thread_id, run_id, timeout_ms):
+        async def wait(self, thread_id, run_id, timeout_ms, environment_id=None):
             if self.gate is not None and not self.gate.is_set():
                 old = self.threads[thread_id]["run"]
                 await self.gate.wait()
                 return {"threadId": thread_id, "runId": old if self.with_run_id else None, "status": "waiting",
                         "timedOut": True}
-            return await super().wait(thread_id, run_id, timeout_ms)
+            return await super().wait(thread_id, run_id, timeout_ms, environment_id)
 
     t3 = LateT3()
     t3.with_run_id = with_run_id
@@ -434,3 +434,18 @@ async def test_cancel_does_not_overwrite_finished_task(store):
     assert out.status == "completed" and store.get(r.id).status == "completed"
     assert t3.interrupts == [] and (r.short_id, "cancelled") not in events
     await tm.close()
+
+
+def test_store_migrates_old_schema(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.sqlite"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE nyanjou_tasks (id TEXT PRIMARY KEY, short_id INTEGER NOT NULL, guild_id INTEGER, "
+                   "channel_id INTEGER, user_id INTEGER NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL, "
+                   "prompt TEXT NOT NULL, project_id TEXT, scratch INTEGER NOT NULL DEFAULT 0, thread_id TEXT, "
+                   "thread_link TEXT, run_id TEXT, status TEXT NOT NULL, result TEXT, error TEXT, notified INTEGER "
+                   "NOT NULL DEFAULT 0, created_at REAL NOT NULL, updated_at REAL NOT NULL, deadline_at REAL)")
+    s = TaskStore(path)
+    r = s.insert(rec(environment_id="env-x"))
+    assert s.get(r.id).environment_id == "env-x"
+    s.close()

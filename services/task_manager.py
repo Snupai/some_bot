@@ -154,7 +154,8 @@ class TaskManager:
                 raise T3Error("Parallel-Limit erreicht; bitte später erneut versuchen.")
             await self._slots.acquire()
         try:
-            res = await self.t3.send(rec.thread_id, message, client_request_id=f"{rec.id}-{uuid.uuid4().hex[:8]}")
+            res = await self.t3.send(rec.thread_id, message, client_request_id=f"{rec.id}-{uuid.uuid4().hex[:8]}",
+                                     environment_id=rec.environment_id)
         except BaseException:
             if reopening:
                 self._slots.release()
@@ -181,13 +182,27 @@ class TaskManager:
             if not rec.active:
                 return rec  # already finished: keep its real outcome
             if rec.thread_id and self.t3 is not None:
-                await self.t3.interrupt(rec.thread_id, rec.run_id, reason, client_request_id=f"{rec.id}-cancel")
+                await self.t3.interrupt(rec.thread_id, rec.run_id, reason, client_request_id=f"{rec.id}-cancel",
+                                        environment_id=rec.environment_id)
             rec = self.store.update(rec.id, status="cancelled", error=reason)  # type: ignore[assignment]
         mon = self._monitors.pop(rec.id, None)
         if mon:
             mon.cancel()
         await self._emit(rec, "cancelled")
         return rec
+
+    async def adopt(self, *, thread_id: str, environment_id: str | None, title: str, message: str, user_id: int,
+                    guild_id: int | None, channel_id: int | None, source: str = "voice") -> TaskRecord:
+        """Send ``message`` to an existing T3 thread (not started by Nyanjou) and track it like a task."""
+        existing = [r for r in self.store.list(guild_id=guild_id, user_id=user_id, limit=200)
+                    if r.thread_id == thread_id and r.environment_id == environment_id]
+        if existing:
+            return await self.update(existing[0], message)
+        rec = TaskRecord(user_id=user_id, title=title[:120] or "T3-Thread", prompt=f"(bestehender Thread) {message}",
+                         source=source, guild_id=guild_id, channel_id=channel_id, environment_id=environment_id,
+                         thread_id=thread_id, status="completed")  # inactive until the message reopens it
+        rec = self.store.insert(rec)
+        return await self.update(rec, message)
 
     def get(self, short_id: int) -> TaskRecord | None:
         return self.store.get_by_short_id(short_id)
@@ -248,6 +263,7 @@ class TaskManager:
                     client_request_id=rec.id,  # idempotent retries
                     workspace_strategy=None if rec.scratch else self.workspace_strategy,
                     runtime_mode=self.runtime_mode,
+                    environment_id=rec.environment_id,
                 )
                 rec = self.store.update(  # type: ignore[assignment]
                     rec.id, status="running", thread_id=res["thread_id"],
@@ -320,7 +336,7 @@ class TaskManager:
                 return
             waited_run = rec.run_id
             try:
-                res = await self.t3.wait(rec.thread_id, waited_run, self.wait_slice_ms)
+                res = await self.t3.wait(rec.thread_id, waited_run, self.wait_slice_ms, environment_id=rec.environment_id)
                 errors = 0
             except asyncio.CancelledError:
                 raise
@@ -355,7 +371,7 @@ class TaskManager:
                 if status == "waiting" or res.get("timedOut") or status in {"running", "starting", "queued", "preparing"}:
                     pass
                 elif status in TERMINAL_STATUSES or status in {"idle", ""}:
-                    reply = await self._safe_read(rec.thread_id, res.get("runId"))
+                    reply = await self._safe_read(rec.thread_id, res.get("runId"), rec.environment_id)
                     if reply.get("status") == "running":
                         # A follow-up was queued behind the finished run; keep watching.
                         self.store.update(task_id, run_id=None)
@@ -383,10 +399,10 @@ class TaskManager:
             if delay:
                 await asyncio.sleep(delay)
 
-    async def _safe_read(self, thread_id: str, run_id: str | None = None) -> dict:
+    async def _safe_read(self, thread_id: str, run_id: str | None = None, environment_id: str | None = None) -> dict:
         assert self.t3 is not None
         try:
-            return await self.t3.read_latest_reply(thread_id, run_id=run_id)
+            return await self.t3.read_latest_reply(thread_id, run_id=run_id, environment_id=environment_id)
         except Exception as exc:
             log.warning("could not read result of thread %s: %s", thread_id, exc)
             return {}

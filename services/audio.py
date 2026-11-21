@@ -131,6 +131,14 @@ def rms_dbfs(samples: np.ndarray) -> float:
     return 20 * math.log10(rms / 32768.0)
 
 
+def is_silence(pcm16: bytes, threshold_dbfs: float = -55.0) -> bool:
+    """True for (near-)silent PCM16 chunks, e.g. the silence GPT-Live streams between replies."""
+    if len(pcm16) < 2:
+        return True
+    s = np.frombuffer(pcm16[: len(pcm16) // 2 * 2], dtype="<i2")
+    return rms_dbfs(s.astype(np.float32)) < threshold_dbfs
+
+
 def mix(frames: list[np.ndarray]) -> np.ndarray:
     """Mix equal-length float frames with soft limiting."""
     if not frames:

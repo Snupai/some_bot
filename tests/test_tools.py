@@ -23,7 +23,8 @@ async def env(tmp_path):
     async def owner(uid):
         return uid == OWNER
 
-    d = ToolDispatcher(tm, authorized, owner, default_project_id="p1", list_projects=t3.list_projects)
+    d = ToolDispatcher(tm, authorized, owner, default_project_id="p1", list_projects=t3.list_projects, t3=t3)
+    d.fake_t3 = t3
     yield d, tm, store
     store.close()
 
@@ -56,7 +57,7 @@ def ctx(user=None, reason="single_speaker", guild=10, speakers=None, *, delegati
 
 
 START = {"title": "Minecraft-Webseite", "task": "Erstelle eine Webseite für meinen Minecraft-Server mit Next.js",
-         "project": None, "new_project": False, "risk_level": "normal", "risk_reason": None, "confirmation_id": None}
+         "project": None, "environment": None, "new_project": False, "risk_level": "normal", "risk_reason": None, "confirmation_id": None}
 
 
 async def call(d, name, args, c):
@@ -287,3 +288,46 @@ async def test_new_question_invalidates_older_confirmations(env):
     assert r["error"] == "invalid_confirmation"  # Nyanjou only asked about B
     r = await call(d, "t3_start_task", {**START, "confirmation_id": b["confirmation_id"]}, yes)
     assert r["ok"] and [t.title for t in store.list()] == ["B"]
+
+
+async def test_thread_and_environment_tools(env):
+    d, tm, store = env
+    r = await call(d, "t3_list_environments", {}, ctx(ALICE))
+    assert [e["id"] for e in r["environments"]] == ["env-here", "env-vps"]
+    r = await call(d, "t3_list_threads", {"query": None, "only_active": False, "environment": None}, ctx(ALICE))
+    assert {t["thread_id"] for t in r["threads"]} >= {"ext-1", "ext-2"}
+    r = await call(d, "t3_thread_info", {"thread": "login", "environment": None}, ctx(ALICE))
+    assert r["ok"] and r["thread"]["thread_id"] == "ext-1" and r["thread"]["last_reply"] == "external"
+    r = await call(d, "t3_thread_info", {"thread": "gibtsnicht", "environment": None}, ctx(ALICE))
+    assert r["error"] == "thread_not_found"
+    r = await call(d, "t3_list_threads", {"query": None, "only_active": False, "environment": "mars"}, ctx(ALICE))
+    assert r["error"] == "unknown_environment"
+    # guests can't even read thread lists
+    r = await call(d, "t3_list_threads", {"query": None, "only_active": False, "environment": None}, ctx(GUEST))
+    assert r["error"] == "not_authorized"
+
+
+async def test_message_existing_thread_adopts_and_tracks_it(env):
+    d, tm, store = env
+    msg = {"thread": "Fix login", "environment": "VPS", "message": "Bitte auch die Signup-Tests fixen",
+           "risk_level": "normal", "confirmation_id": None}
+    r = await call(d, "t3_message_thread", msg, ctx(ALICE))
+    assert r["ok"]
+    t = store.list()[0]
+    assert t.thread_id == "ext-1" and t.environment_id == "env-vps" and t.user_id == ALICE and t.status == "running"
+    assert d.fake_t3.sends == [("ext-1", "Bitte auch die Signup-Tests fixen")]
+    # a second message to the same thread reuses the record
+    r = await call(d, "t3_message_thread", {**msg, "message": "und dann committen"}, ctx(ALICE))
+    assert r["ok"] and len(store.list()) == 1
+
+
+async def test_message_thread_confirmation_is_bound_to_resolved_thread(env):
+    d, tm, store = env
+    msg = {"thread": "Fix login", "environment": None, "message": "git push -f auf main",
+           "risk_level": "normal", "confirmation_id": None}
+    r = await call(d, "t3_message_thread", msg, ctx(ALICE))
+    assert r["status"] == "confirmation_required"
+    r = await call(d, "t3_message_thread", {**msg, "thread": "Minecraft", "message": "x",
+                                            "confirmation_id": r["confirmation_id"]},
+                   ctx(ALICE, delegation="d2", offset=20_000, spoken_since={ALICE: 500}))
+    assert r["ok"] and d.fake_t3.sends == [("ext-1", "git push -f auf main")]

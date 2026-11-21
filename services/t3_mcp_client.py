@@ -259,8 +259,9 @@ class T3McpClient:
 
     async def launch(self, *, title: str, message: str, project_id: str | None, client_request_id: str,
                      scratch: bool = False, workspace_strategy: dict | None = None,
-                     runtime_mode: str | None = None) -> dict:
-        args: dict[str, Any] = {"title": title[:200], "message": message, "clientRequestId": client_request_id}
+                     runtime_mode: str | None = None, environment_id: str | None = None) -> dict:
+        args: dict[str, Any] = {"title": title[:200], "message": message, "clientRequestId": client_request_id,
+                                "environmentId": environment_id}
         if scratch:
             args["scratch"] = True
         else:
@@ -280,31 +281,34 @@ class T3McpClient:
             "raw": res,
         }
 
-    async def send(self, thread_id: str, message: str, client_request_id: str, mode: str = "auto") -> dict:
+    async def send(self, thread_id: str, message: str, client_request_id: str, mode: str = "auto",
+                   environment_id: str | None = None) -> dict:
         res = await self.call(
             "t3_thread_send",
-            {"threadId": thread_id, "message": message, "mode": mode, "clientRequestId": client_request_id},
+            {"threadId": thread_id, "message": message, "mode": mode, "clientRequestId": client_request_id,
+             "environmentId": environment_id},
             timeout_s=60,
         )
         return {"run_id": find_key(res, "runId", "activeRunId", "latestRunId"), "raw": res}
 
-    async def wait(self, thread_id: str, run_id: str | None, timeout_ms: int) -> dict:
+    async def wait(self, thread_id: str, run_id: str | None, timeout_ms: int, environment_id: str | None = None) -> dict:
         res = await self.call(
             "t3_thread_wait",
-            {"threadId": thread_id, "runId": run_id, "timeoutMs": timeout_ms},
+            {"threadId": thread_id, "runId": run_id, "timeoutMs": timeout_ms, "environmentId": environment_id},
             timeout_s=timeout_ms / 1000 + 60,
         )
         if not isinstance(res, dict):
             res = {"text": str(res)}
         return res
 
-    async def read_latest_reply(self, thread_id: str, max_chars: int = 6000, run_id: str | None = None) -> dict:
+    async def read_latest_reply(self, thread_id: str, max_chars: int = 6000, run_id: str | None = None,
+                                environment_id: str | None = None) -> dict:
         # A cursorless read pages forward from the *oldest* items for outside agents
         # (OrchestratorMcpService.readThread); beforePosition selects the newest page.
         res = await self.call(
             "t3_thread_read",
             {"threadId": thread_id, "view": "messages", "limit": 10, "maxCharsPerItem": max_chars,
-             "runLimit": 1, "beforePosition": NEWEST_POSITION},
+             "runLimit": 1, "beforePosition": NEWEST_POSITION, "environmentId": environment_id},
         )
         items = res.get("items") if isinstance(res, dict) else None
         replies = [i for i in (items or []) if i.get("type") == "assistant_message" and i.get("text")]
@@ -318,13 +322,46 @@ class T3McpClient:
             "status": (thread or {}).get("status"),
             "pending_requests": (thread or {}).get("pendingRequestCount", 0),
             "link": (thread or {}).get("link"),
+            "title": (thread or {}).get("title"),
         }
 
-    async def interrupt(self, thread_id: str, run_id: str | None, reason: str, client_request_id: str) -> Any:
+    async def interrupt(self, thread_id: str, run_id: str | None, reason: str, client_request_id: str,
+                        environment_id: str | None = None) -> Any:
         if not self.has_tool("t3_thread_interrupt"):
             raise T3Unavailable("T3 MCP does not offer t3_thread_interrupt")
         return await self.call(
             "t3_thread_interrupt",
             {"threadId": thread_id, "runId": run_id, "stop": True, "reason": reason[:500],
-             "clientRequestId": client_request_id},
+             "clientRequestId": client_request_id, "environmentId": environment_id},
         )
+
+    async def list_environments(self) -> list[dict]:
+        """This environment plus linked ones (t3_environment_links)."""
+        if not self.has_tool("t3_environment_links"):
+            return []
+        res = await self.call("t3_environment_links", {})
+        if not isinstance(res, dict):
+            return []
+        envs = [{"id": res.get("environmentId"), "label": "dieses System", "current": True}]
+        for link in res.get("links") or []:
+            envs.append({"id": link.get("environmentId"), "label": link.get("label") or link.get("name"),
+                         "reachable": link.get("reachable", link.get("status"))})
+        return [e for e in envs if e.get("id")]
+
+    async def list_threads(self, *, query: str | None = None, only_active: bool = False,
+                           environment_id: str | None = None, limit: int = 10) -> list[dict]:
+        if query and self.has_tool("t3_thread_search"):
+            res = await self.call("t3_thread_search", {"query": query, "limit": limit, "environmentId": environment_id})
+        else:
+            args: dict[str, Any] = {"allProjects": True, "limit": limit, "environmentId": environment_id}
+            if only_active:
+                args["statuses"] = ["queued", "starting", "running", "waiting", "preparing"]
+            res = await self.call("t3_thread_list", args)
+        threads = (res.get("threads") or res.get("matches") or []) if isinstance(res, dict) else []
+        out = []
+        for t in threads:
+            if t.get("parentThreadId"):
+                continue  # skip subagent threads
+            out.append({"thread_id": t.get("threadId"), "title": t.get("title"), "status": t.get("status"),
+                        "project_id": t.get("projectId"), "updated_at": t.get("updatedAt")})
+        return out

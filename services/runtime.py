@@ -61,6 +61,7 @@ class NyanjouRuntime:
             default_project_id=cfg.t3_project_id,
             allow_scratch=cfg.t3_allow_scratch,
             list_projects=self.t3.list_projects if self.t3 else None,
+            t3=self.t3,
         )
         self.sessions: dict[int, Any] = {}  # guild_id -> VoiceSession
         self.prefs: dict[int, dict[str, str]] = {}  # guild_id -> {"voice":..., "model":...}

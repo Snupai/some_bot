@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS nyanjou_tasks (
     title TEXT NOT NULL,
     prompt TEXT NOT NULL,
     project_id TEXT,
+    environment_id TEXT,
     scratch INTEGER NOT NULL DEFAULT 0,
     thread_id TEXT,
     thread_link TEXT,
@@ -56,6 +57,7 @@ class TaskRecord:
     channel_id: int | None = None
     project_id: str | None = None
     scratch: bool = False
+    environment_id: str | None = None
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     short_id: int = 0
     thread_id: str | None = None
@@ -97,6 +99,9 @@ class TaskStore:
         self._db = sqlite3.connect(self.path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.executescript(SCHEMA)
+        cols = {r[1] for r in self._db.execute("PRAGMA table_info(nyanjou_tasks)")}
+        if "environment_id" not in cols:  # migrate databases created before environments were supported
+            self._db.execute("ALTER TABLE nyanjou_tasks ADD COLUMN environment_id TEXT")
         self._db.commit()
 
     def close(self) -> None:
