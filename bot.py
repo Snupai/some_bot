@@ -52,6 +52,30 @@ class Bot(commands.AutoShardedBot):
         signals = (signal.SIGTERM, signal.SIGINT, signal.SIGBREAK if sys.platform == "win32" else signal.SIGQUIT)
         for sig in signals:
             signal.signal(sig, self.handle_signal)
+
+    async def on_ready(self) -> None:
+        # Pycord's run() replaces the handlers above with loop handlers that just stop the loop and
+        # cancel every task at once. Long-lived MCP sessions (Nyanjou) don't survive that mass
+        # cancellation, and the process hangs until systemd kills it. Re-register on the running
+        # loop so SIGTERM/SIGINT run the orderly cleanup() instead.
+        if sys.platform == "win32" or getattr(self, "_loop_signals_installed", False):
+            return
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, self._on_loop_signal, sig)
+        self._loop_signals_installed = True
+
+    def _on_loop_signal(self, signum) -> None:
+        if getattr(self, "_shutting_down", False):
+            return
+        self._shutting_down = True
+        self.logger.info(f"Received signal {signum}. Starting clean shutdown...")
+        # Safety net: never hang shutdown longer than 20 s.
+        import threading
+        timer = threading.Timer(20.0, lambda: os._exit(0))
+        timer.daemon = True
+        timer.start()
+        asyncio.get_running_loop().create_task(self.cleanup())
             
     def handle_signal(self, signum, frame) -> None:
         """Handle termination signals"""
