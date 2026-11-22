@@ -12,3 +12,6 @@
 - YouTube notifications use the channel uploads playlist and track `last_video_published_at` to reduce duplicate or late notifications.
 - RSS forwarding uses stable entry IDs (prefer link) and claims `FeedForwards` before sending to reduce double posts.
 - AI cogs: Gemini model IDs and Pro system prompts live in `cogs/google_ai.py` and `cogs/google_ai_sys_prompts/gemini_2_5_pro_exp_03_25*.md`; Perplexity uses `sonar*` model names in `cogs/pplx-ai.py`; `cogs/bot-dm.py` honors `OPENAI_ASSISTANT_ID` and `OPENAI_TOKEN_COUNT_MODEL` from the environment (see `.env.example`).
+- Nyanjou (voice assistant): cogs `cogs/nyanjou_voice.py` + `cogs/nyanjou_tasks.py`, logic in `services/`. Discord voice I/O runs in the Node sidecar `bridge/` (`@discordjs/voice`, DAVE) because Pycord can't receive under DAVE. Python keeps the gateway via `BridgeVoiceProtocol`. Docs: `docs/nyanjou-integration.md`.
+- `.gitignore` ignores `*.json` and `[Ss]cripts`. Helper scripts live in `tools/`, and `bridge/package*.json` are explicitly un-ignored.
+- Tests: `uv run pytest` (pytest-asyncio auto mode) and `cd bridge && npm test` (Node ≥ 22.12, e.g. `fnm use 22`).

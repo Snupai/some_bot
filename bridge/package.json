@@ -1,0 +1,20 @@
+{
+  "name": "nyanjou-voice-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Discord voice bridge (DAVE-capable send/receive) for the Python Nyanjou voice assistant.",
+  "type": "module",
+  "main": "index.mjs",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "start": "node index.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@discordjs/opus": "^0.11.0",
+    "@discordjs/voice": "^0.19.2",
+    "ws": "^8.23.0"
+  }
+}
